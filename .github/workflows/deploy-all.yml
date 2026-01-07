@@ -1,0 +1,406 @@
+name: Deploy All Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      skip_eks:
+        description: 'Skip EKS deployment (if already exists)'
+        required: false
+        type: boolean
+        default: false
+      skip_database:
+        description: 'Skip Database deployment (if already exists)'
+        required: false
+        type: boolean
+        default: false
+      skip_lambda:
+        description: 'Skip Lambda deployment'
+        required: false
+        type: boolean
+        default: false
+      skip_app:
+        description: 'Skip K8s App deployment'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  AWS_REGION: 'us-east-1'
+  GITHUB_ORG: ${{ github.repository_owner }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Step 0: Validate Prerequisites
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate Prerequisites
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Validate AWS Credentials
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "::error::AWS_ACCESS_KEY_ID secret not configured"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "::error::AWS_SECRET_ACCESS_KEY secret not configured"
+            exit 1
+          fi
+          echo "AWS credentials configured"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check S3 Backend Exists
+        run: |
+          if aws s3 ls "s3://fiap-tech-challenge-terraform-state" 2>&1 | grep -q 'NoSuchBucket'; then
+            echo "::error::Terraform state bucket does not exist. Run bootstrap first!"
+            exit 1
+          fi
+          echo "Terraform state bucket exists"
+
+      - name: Check DynamoDB Lock Table
+        run: |
+          if ! aws dynamodb describe-table --table-name fiap-terraform-locks 2>/dev/null; then
+            echo "::error::DynamoDB lock table does not exist. Run bootstrap first!"
+            exit 1
+          fi
+          echo "DynamoDB lock table exists"
+
+      - name: Summary
+        run: |
+          echo "## Prerequisites Validated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **S3 Backend:** Exists" >> $GITHUB_STEP_SUMMARY
+          echo "- **DynamoDB Lock:** Exists" >> $GITHUB_STEP_SUMMARY
+          echo "- **AWS Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Step 1: Deploy Kubernetes Infrastructure (VPC, EKS)
+  # ---------------------------------------------------------------------------
+  deploy-eks:
+    name: "1. Deploy EKS Infrastructure"
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ github.event.inputs.skip_eks != 'true' }}
+    steps:
+      - name: Trigger kubernetes-core-infra workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: 'kubernetes-core-infra',
+              workflow_id: 'terraform.yml',
+              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+              inputs: {
+                environment: '${{ github.event.inputs.environment }}',
+                action: 'apply'
+              }
+            });
+            console.log('Triggered kubernetes-core-infra deployment');
+
+      - name: Wait for EKS deployment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const maxAttempts = 60; // 30 minutes max
+            let attempts = 0;
+
+            while (attempts < maxAttempts) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: 'kubernetes-core-infra',
+                workflow_id: 'terraform.yml',
+                per_page: 1
+              });
+
+              const latestRun = runs.data.workflow_runs[0];
+              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+
+              if (latestRun.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('EKS deployment completed successfully');
+                  return;
+                } else {
+                  throw new Error(`EKS deployment failed: ${latestRun.conclusion}`);
+                }
+              }
+
+              attempts++;
+              await delay(30000); // Wait 30 seconds
+            }
+
+            throw new Error('EKS deployment timed out');
+
+      - name: Summary
+        run: |
+          echo "## EKS Infrastructure Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Step 2: Deploy Database Infrastructure (RDS)
+  # ---------------------------------------------------------------------------
+  deploy-database:
+    name: "2. Deploy Database Infrastructure"
+    runs-on: ubuntu-latest
+    needs: [validate, deploy-eks]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.deploy-eks.result == 'success' || needs.deploy-eks.result == 'skipped') &&
+      github.event.inputs.skip_database != 'true'
+    steps:
+      - name: Trigger database-managed-infra workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: 'database-managed-infra',
+              workflow_id: 'terraform.yml',
+              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+              inputs: {
+                environment: '${{ github.event.inputs.environment }}',
+                action: 'apply'
+              }
+            });
+            console.log('Triggered database-managed-infra deployment');
+
+      - name: Wait for Database deployment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const maxAttempts = 40; // 20 minutes max
+            let attempts = 0;
+
+            while (attempts < maxAttempts) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: 'database-managed-infra',
+                workflow_id: 'terraform.yml',
+                per_page: 1
+              });
+
+              const latestRun = runs.data.workflow_runs[0];
+              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+
+              if (latestRun.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('Database deployment completed successfully');
+                  return;
+                } else {
+                  throw new Error(`Database deployment failed: ${latestRun.conclusion}`);
+                }
+              }
+
+              attempts++;
+              await delay(30000); // Wait 30 seconds
+            }
+
+            throw new Error('Database deployment timed out');
+
+      - name: Summary
+        run: |
+          echo "## Database Infrastructure Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Step 3: Deploy Lambda Functions
+  # ---------------------------------------------------------------------------
+  deploy-lambda:
+    name: "3. Deploy Lambda Functions"
+    runs-on: ubuntu-latest
+    needs: [validate, deploy-eks, deploy-database]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.deploy-eks.result == 'success' || needs.deploy-eks.result == 'skipped') &&
+      (needs.deploy-database.result == 'success' || needs.deploy-database.result == 'skipped') &&
+      github.event.inputs.skip_lambda != 'true'
+    steps:
+      - name: Trigger lambda-api-handler workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: 'lambda-api-handler',
+              workflow_id: 'deploy.yml',
+              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+              inputs: {
+                environment: '${{ github.event.inputs.environment }}',
+                action: 'deploy'
+              }
+            });
+            console.log('Triggered lambda-api-handler deployment');
+
+      - name: Wait for Lambda deployment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const maxAttempts = 20; // 10 minutes max
+            let attempts = 0;
+
+            while (attempts < maxAttempts) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: 'lambda-api-handler',
+                workflow_id: 'deploy.yml',
+                per_page: 1
+              });
+
+              const latestRun = runs.data.workflow_runs[0];
+              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+
+              if (latestRun.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('Lambda deployment completed successfully');
+                  return;
+                } else {
+                  throw new Error(`Lambda deployment failed: ${latestRun.conclusion}`);
+                }
+              }
+
+              attempts++;
+              await delay(30000); // Wait 30 seconds
+            }
+
+            throw new Error('Lambda deployment timed out');
+
+      - name: Summary
+        run: |
+          echo "## Lambda Functions Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Step 4: Deploy Kubernetes Application
+  # ---------------------------------------------------------------------------
+  deploy-app:
+    name: "4. Deploy K8s Application"
+    runs-on: ubuntu-latest
+    needs: [validate, deploy-eks, deploy-database, deploy-lambda]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.deploy-eks.result == 'success' || needs.deploy-eks.result == 'skipped') &&
+      (needs.deploy-database.result == 'success' || needs.deploy-database.result == 'skipped') &&
+      (needs.deploy-lambda.result == 'success' || needs.deploy-lambda.result == 'skipped') &&
+      github.event.inputs.skip_app != 'true'
+    steps:
+      - name: Trigger k8s-main-service workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: 'k8s-main-service',
+              workflow_id: 'deploy.yml',
+              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+              inputs: {
+                environment: '${{ github.event.inputs.environment }}'
+              }
+            });
+            console.log('Triggered k8s-main-service deployment');
+
+      - name: Wait for App deployment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const maxAttempts = 20; // 10 minutes max
+            let attempts = 0;
+
+            while (attempts < maxAttempts) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: 'k8s-main-service',
+                workflow_id: 'deploy.yml',
+                per_page: 1
+              });
+
+              const latestRun = runs.data.workflow_runs[0];
+              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+
+              if (latestRun.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('App deployment completed successfully');
+                  return;
+                } else {
+                  throw new Error(`App deployment failed: ${latestRun.conclusion}`);
+                }
+              }
+
+              attempts++;
+              await delay(30000); // Wait 30 seconds
+            }
+
+            throw new Error('App deployment timed out');
+
+      - name: Summary
+        run: |
+          echo "## K8s Application Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Final Summary
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [validate, deploy-eks, deploy-database, deploy-lambda, deploy-app]
+    if: always()
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# Full Infrastructure Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Environment: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Prerequisites | ${{ needs.validate.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| EKS Infrastructure | ${{ needs.deploy-eks.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Database (RDS) | ${{ needs.deploy-database.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lambda Functions | ${{ needs.deploy-lambda.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| K8s Application | ${{ needs.deploy-app.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Configure kubectl: \`aws eks update-kubeconfig --region us-east-1 --name fiap-eks-${{ github.event.inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. Check pods: \`kubectl get pods -n ftc-app\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Get API Gateway URL from Lambda deployment output" >> $GITHUB_STEP_SUMMARY

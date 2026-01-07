@@ -1,0 +1,10 @@
+{
+  "name": "infra-orchestrator",
+  "version": "1.0.0",
+  "description": "Orchestrator for FIAP Tech Challenge infrastructure deployment",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "info": "echo 'This project uses GitHub Actions workflows. See README.md for usage.'"
+  }
+}
