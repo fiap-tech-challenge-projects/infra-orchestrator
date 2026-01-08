@@ -56,6 +56,9 @@ jobs:
             echo "::error::AWS_SECRET_ACCESS_KEY secret not configured"
             exit 1
           fi
+          if [ -z "${{ secrets.AWS_SESSION_TOKEN }}" ]; then
+            echo "::warning::AWS_SESSION_TOKEN not configured (required for AWS Academy)"
+          fi
           echo "AWS credentials configured"
 
       - name: Configure AWS Credentials
@@ -63,11 +66,12 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Check S3 Backend Exists
         run: |
-          if aws s3 ls "s3://fiap-tech-challenge-terraform-state" 2>&1 | grep -q 'NoSuchBucket'; then
+          if aws s3 ls "s3://fiap-tech-challenge-tf-state-118735037876" 2>&1 | grep -q 'NoSuchBucket'; then
             echo "::error::Terraform state bucket does not exist. Run bootstrap first!"
             exit 1
           fi

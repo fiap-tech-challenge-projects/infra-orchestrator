@@ -23,7 +23,10 @@ Configure os seguintes secrets em **todos os repositorios** (incluindo este):
 |--------|-----------|
 | `AWS_ACCESS_KEY_ID` | Access Key da AWS |
 | `AWS_SECRET_ACCESS_KEY` | Secret Key da AWS |
+| `AWS_SESSION_TOKEN` | Session Token da AWS (obrigatorio para AWS Academy) |
 | `GH_PAT` | Personal Access Token do GitHub com permissao `repo` e `workflow` |
+
+> **Nota AWS Academy**: O `AWS_SESSION_TOKEN` expira a cada 4 horas. Atualize manualmente antes de cada deploy.
 
 ### 2. Personal Access Token (GH_PAT)
 
