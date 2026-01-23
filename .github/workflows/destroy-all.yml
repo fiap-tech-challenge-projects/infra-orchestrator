@@ -40,12 +40,54 @@ jobs:
           echo "Environment: **${{ github.event.inputs.environment }}**" >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------------
+  # Clean Terraform State Locks
+  # ---------------------------------------------------------------------------
+  clean-locks:
+    name: Clean Terraform State Locks
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Clean state locks
+        run: |
+          echo "Checking for stale Terraform state locks..."
+
+          # Scan for locks
+          locks=$(aws dynamodb scan --table-name fiap-terraform-locks --query 'Items[*].LockID.S' --output text 2>/dev/null || echo "")
+
+          if [ -n "$locks" ]; then
+            echo "Found locks to clean:"
+            echo "$locks"
+
+            # Delete each lock
+            for lock in $locks; do
+              if [[ "$lock" == *"${{ github.event.inputs.environment }}"* ]]; then
+                echo "Deleting lock: $lock"
+                aws dynamodb delete-item \
+                  --table-name fiap-terraform-locks \
+                  --key "{\"LockID\": {\"S\": \"$lock\"}}" 2>/dev/null || true
+              fi
+            done
+
+            echo "✓ Locks cleaned"
+          else
+            echo "No locks found"
+          fi
+
+  # ---------------------------------------------------------------------------
   # Step 1: Destroy K8s Application (reverse order)
   # ---------------------------------------------------------------------------
   destroy-app:
     name: "1. Destroy K8s Application"
     runs-on: ubuntu-latest
-    needs: validate
+    needs: [validate, clean-locks]
     # Removed continue-on-error to properly report failures
     steps:
       - name: Trigger k8s-main-service destroy
@@ -107,13 +149,19 @@ jobs:
                 workflow_id: 'deploy.yml',
                 per_page: 1
               });
-              if (runs.data.workflow_runs[0]?.status === 'completed') {
-                console.log('Lambda destruction completed');
-                return;
+              const latestRun = runs.data.workflow_runs[0];
+              if (latestRun?.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('✓ Lambda destruction completed successfully');
+                  return;
+                } else {
+                  throw new Error(`Lambda destruction failed: ${latestRun.conclusion}`);
+                }
               }
               attempts++;
               await delay(30000);
             }
+            throw new Error('Lambda destruction timed out');
 
   # ---------------------------------------------------------------------------
   # Step 3: Destroy Database
@@ -154,13 +202,19 @@ jobs:
                 workflow_id: 'terraform.yml',
                 per_page: 1
               });
-              if (runs.data.workflow_runs[0]?.status === 'completed') {
-                console.log('Database destruction completed');
-                return;
+              const latestRun = runs.data.workflow_runs[0];
+              if (latestRun?.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('✓ Database destruction completed successfully');
+                  return;
+                } else {
+                  throw new Error(`Database destruction failed: ${latestRun.conclusion}`);
+                }
               }
               attempts++;
               await delay(30000);
             }
+            throw new Error('Database destruction timed out');
 
   # ---------------------------------------------------------------------------
   # Step 4: Destroy EKS Infrastructure
@@ -200,13 +254,84 @@ jobs:
                 workflow_id: 'terraform.yml',
                 per_page: 1
               });
-              if (runs.data.workflow_runs[0]?.status === 'completed') {
-                console.log('EKS destruction completed');
-                return;
+              const latestRun = runs.data.workflow_runs[0];
+              if (latestRun?.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('✓ EKS destruction completed successfully');
+                  return;
+                } else {
+                  throw new Error(`EKS destruction failed: ${latestRun.conclusion}`);
+                }
               }
               attempts++;
               await delay(30000);
             }
+            throw new Error('EKS destruction timed out');
+
+  # ---------------------------------------------------------------------------
+  # Validate Resources Deleted
+  # ---------------------------------------------------------------------------
+  validate-cleanup:
+    name: Validate Resources Deleted
+    runs-on: ubuntu-latest
+    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks]
+    if: always()
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Check for orphaned resources
+        run: |
+          echo "Checking for orphaned AWS resources..."
+
+          ORPHANED_RESOURCES=0
+
+          # Check EKS cluster
+          if aws eks describe-cluster --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }} --region us-east-1 &>/dev/null; then
+            echo "::warning::EKS cluster still exists!"
+            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+          else
+            echo "✓ EKS cluster deleted"
+          fi
+
+          # Check RDS
+          if aws rds describe-db-instances --db-instance-identifier fiap-tech-challenge-db-${{ github.event.inputs.environment }} --region us-east-1 &>/dev/null; then
+            echo "::warning::RDS instance still exists!"
+            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+          else
+            echo "✓ RDS instance deleted"
+          fi
+
+          # Check VPC
+          vpc_id=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Project,Values=fiap-tech-challenge" "Name=tag:Environment,Values=${{ github.event.inputs.environment }}" \
+            --region us-east-1 \
+            --query 'Vpcs[0].VpcId' \
+            --output text 2>/dev/null || echo "None")
+
+          if [ "$vpc_id" != "None" ] && [ -n "$vpc_id" ]; then
+            echo "::warning::VPC still exists: $vpc_id"
+            echo "::warning::Run cleanup script: ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}"
+            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+          else
+            echo "✓ VPC deleted"
+          fi
+
+          # Report summary
+          if [ $ORPHANED_RESOURCES -gt 0 ]; then
+            echo ""
+            echo "::error::Found $ORPHANED_RESOURCES orphaned resource(s)"
+            echo "::error::Manual cleanup required. Run: ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}"
+            exit 1
+          else
+            echo ""
+            echo "✓ All resources successfully deleted"
+          fi
 
   # ---------------------------------------------------------------------------
   # Summary
@@ -214,7 +339,7 @@ jobs:
   summary:
     name: Destruction Summary
     runs-on: ubuntu-latest
-    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks]
+    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks, validate-cleanup]
     if: always()
     steps:
       - name: Generate Summary
