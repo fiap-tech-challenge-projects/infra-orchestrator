@@ -50,16 +50,32 @@ check_gh_cli() {
     echo -e "${GREEN}✓ GitHub CLI authenticated${NC}"
 }
 
-get_github_username() {
+get_github_owner() {
     # Auto-detect GitHub username from gh CLI
-    GITHUB_OWNER=$(gh api user -q '.login' 2>/dev/null)
+    local username=$(gh api user -q '.login' 2>/dev/null)
 
-    if [[ -z "$GITHUB_OWNER" ]]; then
+    if [[ -z "$username" ]]; then
         echo -e "${YELLOW}Could not auto-detect GitHub username${NC}"
-        read -p "Enter your GitHub username: " GITHUB_OWNER
+        read -p "Enter your GitHub username: " username
     else
-        echo -e "${GREEN}✓ GitHub user: ${GITHUB_OWNER}${NC}"
+        echo -e "${GREEN}✓ GitHub user: ${username}${NC}"
     fi
+
+    echo -e "\n${CYAN}Update secrets in:${NC}"
+    echo "  1) Personal repositories (${username}/*)"
+    echo "  2) Organization repositories (fiap-tech-challenge-projects/*)"
+    read -p "Choice [1/2]: " owner_choice
+
+    case $owner_choice in
+        2)
+            GITHUB_OWNER="fiap-tech-challenge-projects"
+            echo -e "${GREEN}✓ Targeting organization: ${GITHUB_OWNER}${NC}"
+            ;;
+        *)
+            GITHUB_OWNER="$username"
+            echo -e "${GREEN}✓ Targeting personal repos: ${GITHUB_OWNER}${NC}"
+            ;;
+    esac
 }
 
 get_aws_academy_credentials() {
@@ -159,7 +175,7 @@ update_repo_secrets() {
 
 print_header
 check_gh_cli
-get_github_username
+get_github_owner
 
 echo -e "\n${CYAN}How do you want to enter credentials?${NC}"
 echo "  1) Enter values one by one"
