@@ -79,10 +79,14 @@ jobs:
 
       - name: Check DynamoDB Lock Table
         run: |
-          if ! aws dynamodb describe-table --table-name fiap-terraform-locks 2>/dev/null; then
+          # Try to describe table - only fail if ResourceNotFoundException
+          ERROR=$(aws dynamodb describe-table --table-name fiap-terraform-locks 2>&1 || true)
+
+          if echo "$ERROR" | grep -q "ResourceNotFoundException"; then
             echo "::error::DynamoDB lock table does not exist. Run bootstrap first!"
             exit 1
           fi
+
           echo "DynamoDB lock table exists"
 
       - name: Summary
