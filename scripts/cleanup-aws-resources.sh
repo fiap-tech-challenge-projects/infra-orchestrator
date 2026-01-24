@@ -276,6 +276,38 @@ cleanup_secrets() {
     fi
 }
 
+cleanup_kms_aliases() {
+    print_step "Cleaning up KMS Aliases..."
+
+    # Delete KMS alias for EKS
+    local alias_name="alias/${PROJECT_NAME}-eks-${ENVIRONMENT}"
+
+    if aws kms describe-alias --alias-name "$alias_name" --region "$REGION" 2>/dev/null; then
+        print_info "Deleting KMS alias: $alias_name"
+        aws kms delete-alias --alias-name "$alias_name" --region "$REGION" 2>/dev/null || true
+        print_success "KMS alias deleted"
+    else
+        print_info "No KMS alias found"
+    fi
+}
+
+cleanup_cloudwatch_logs() {
+    print_step "Cleaning up CloudWatch Log Groups..."
+
+    # List all log groups for the project
+    local log_groups=$(aws logs describe-log-groups --region "$REGION" --query "logGroups[?contains(logGroupName, '${PROJECT_NAME}')].logGroupName" --output text)
+
+    if [ -n "$log_groups" ]; then
+        for log_group in $log_groups; do
+            print_info "Deleting log group: $log_group"
+            aws logs delete-log-group --log-group-name "$log_group" --region "$REGION" 2>/dev/null || true
+        done
+        print_success "CloudWatch log groups deleted"
+    else
+        print_info "No log groups found"
+    fi
+}
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -285,6 +317,8 @@ confirm_deletion
 
 echo -e "\n${YELLOW}Starting AGGRESSIVE cleanup for: ${ENVIRONMENT}${NC}\n"
 
+cleanup_cloudwatch_logs
+cleanup_kms_aliases
 cleanup_lambda
 cleanup_rds
 cleanup_eks_cluster
