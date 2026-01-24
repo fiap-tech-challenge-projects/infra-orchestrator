@@ -316,11 +316,11 @@ confirm_deletion
 
 echo -e "\n${YELLOW}Starting AGGRESSIVE cleanup for: ${ENVIRONMENT}${NC}\n"
 
-cleanup_cloudwatch_logs
-cleanup_kms_aliases
 cleanup_lambda
 cleanup_rds
 cleanup_eks_cluster
+cleanup_kms_aliases
+cleanup_cloudwatch_logs
 cleanup_vpc_aggressive
 cleanup_secrets
 
