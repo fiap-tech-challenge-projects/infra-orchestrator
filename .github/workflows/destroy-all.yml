@@ -88,7 +88,7 @@ jobs:
     name: "1. Destroy K8s Application"
     runs-on: ubuntu-latest
     needs: [validate, clean-locks]
-    # Removed continue-on-error to properly report failures
+    continue-on-error: true
     steps:
       - name: Trigger k8s-main-service destroy
         uses: actions/github-script@v7
@@ -117,7 +117,8 @@ jobs:
     name: "2. Destroy Lambda Functions"
     runs-on: ubuntu-latest
     needs: [validate, destroy-app]
-    # Removed continue-on-error to properly report failures
+    if: always() && needs.validate.result == 'success'
+    continue-on-error: true
     steps:
       - name: Trigger lambda-api-handler destroy
         uses: actions/github-script@v7
@@ -136,6 +137,7 @@ jobs:
             });
 
       - name: Wait for Lambda destruction
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PAT }}
@@ -155,13 +157,14 @@ jobs:
                   console.log('✓ Lambda destruction completed successfully');
                   return;
                 } else {
-                  throw new Error(`Lambda destruction failed: ${latestRun.conclusion}`);
+                  console.log(`⚠ Lambda destruction failed: ${latestRun.conclusion}`);
+                  return; // Don't throw, just log and continue
                 }
               }
               attempts++;
               await delay(30000);
             }
-            throw new Error('Lambda destruction timed out');
+            console.log('⚠ Lambda destruction timed out');
 
   # ---------------------------------------------------------------------------
   # Step 3: Destroy Database
@@ -170,7 +173,8 @@ jobs:
     name: "3. Destroy Database"
     runs-on: ubuntu-latest
     needs: [validate, destroy-lambda]
-    # Removed continue-on-error to properly report failures
+    if: always() && needs.validate.result == 'success'
+    continue-on-error: true
     steps:
       - name: Trigger database-managed-infra destroy
         uses: actions/github-script@v7
@@ -189,6 +193,7 @@ jobs:
             });
 
       - name: Wait for Database destruction
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PAT }}
@@ -208,13 +213,14 @@ jobs:
                   console.log('✓ Database destruction completed successfully');
                   return;
                 } else {
-                  throw new Error(`Database destruction failed: ${latestRun.conclusion}`);
+                  console.log(`⚠ Database destruction failed: ${latestRun.conclusion}`);
+                  return; // Don't throw, just log and continue
                 }
               }
               attempts++;
               await delay(30000);
             }
-            throw new Error('Database destruction timed out');
+            console.log('⚠ Database destruction timed out');
 
   # ---------------------------------------------------------------------------
   # Step 4: Destroy EKS Infrastructure
@@ -223,6 +229,8 @@ jobs:
     name: "4. Destroy EKS Infrastructure"
     runs-on: ubuntu-latest
     needs: [validate, destroy-database]
+    if: always() && needs.validate.result == 'success'
+    continue-on-error: true
     steps:
       - name: Trigger kubernetes-core-infra destroy
         uses: actions/github-script@v7
@@ -241,6 +249,7 @@ jobs:
             });
 
       - name: Wait for EKS destruction
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PAT }}
@@ -260,13 +269,14 @@ jobs:
                   console.log('✓ EKS destruction completed successfully');
                   return;
                 } else {
-                  throw new Error(`EKS destruction failed: ${latestRun.conclusion}`);
+                  console.log(`⚠ EKS destruction failed: ${latestRun.conclusion}`);
+                  return; // Don't throw, just log and continue
                 }
               }
               attempts++;
               await delay(30000);
             }
-            throw new Error('EKS destruction timed out');
+            console.log('⚠ EKS destruction timed out');
 
   # ---------------------------------------------------------------------------
   # Validate Resources Deleted
