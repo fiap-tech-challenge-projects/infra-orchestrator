@@ -45,15 +45,23 @@ jobs:
 
       - name: Create S3 Bucket
         if: ${{ github.event.inputs.action == 'create' }}
+        continue-on-error: true
+        id: create-bucket
         run: |
           echo "Creating S3 bucket: ${STATE_BUCKET}"
 
           # Check if bucket exists in current account
           if aws s3api head-bucket --bucket "${STATE_BUCKET}" 2>/dev/null; then
-            echo "✓ Bucket ${STATE_BUCKET} already exists in current account"
-          else
-            echo "Creating new bucket ${STATE_BUCKET}"
-            aws s3 mb "s3://${STATE_BUCKET}" --region ${{ env.AWS_REGION }}
+            echo "✓ Bucket ${STATE_BUCKET} already exists"
+            echo "bucket_exists=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Bucket does not exist. Attempting to create..."
+
+          # Try to create bucket (may fail due to AWS Academy LabRole restrictions)
+          if aws s3 mb "s3://${STATE_BUCKET}" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✓ Bucket created via CLI"
 
             # Enable versioning
             aws s3api put-bucket-versioning \
@@ -81,8 +89,47 @@ jobs:
                 "RestrictPublicBuckets": true
               }'
 
-            echo "✓ Bucket created successfully"
+            echo "bucket_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Cannot create bucket via CLI (AWS Academy LabRole restriction)"
+            echo "bucket_exists=false" >> $GITHUB_OUTPUT
+            exit 1
           fi
+
+      - name: Manual Bucket Creation Instructions
+        if: ${{ github.event.inputs.action == 'create' && steps.create-bucket.outputs.bucket_exists != 'true' }}
+        run: |
+          echo "::error::S3 bucket creation failed due to AWS Academy permissions"
+          echo ""
+          echo "Please create the bucket MANUALLY via AWS Console:"
+          echo ""
+          echo "1. Go to: https://console.aws.amazon.com/s3"
+          echo "2. Click 'Create bucket'"
+          echo "3. Bucket name: ${STATE_BUCKET}"
+          echo "4. Region: us-east-1"
+          echo "5. Enable 'Bucket Versioning'"
+          echo "6. Enable 'Default encryption' (SSE-S3)"
+          echo "7. Enable 'Block all public access'"
+          echo "8. Click 'Create bucket'"
+          echo ""
+          echo "Then re-run this workflow."
+          echo ""
+          echo "## Manual Bucket Creation Required" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "AWS Academy LabRole does not allow S3 bucket creation via CLI." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Create bucket manually:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to [S3 Console](https://console.aws.amazon.com/s3)" >> $GITHUB_STEP_SUMMARY
+          echo "2. Click **Create bucket**" >> $GITHUB_STEP_SUMMARY
+          echo "3. **Bucket name:** \`${STATE_BUCKET}\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. **Region:** \`us-east-1\`" >> $GITHUB_STEP_SUMMARY
+          echo "5. Enable **Bucket Versioning**" >> $GITHUB_STEP_SUMMARY
+          echo "6. Enable **Default encryption** (SSE-S3)" >> $GITHUB_STEP_SUMMARY
+          echo "7. Enable **Block all public access**" >> $GITHUB_STEP_SUMMARY
+          echo "8. Click **Create bucket**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Then re-run this bootstrap workflow." >> $GITHUB_STEP_SUMMARY
+          exit 0
 
       - name: Create DynamoDB Table
         if: ${{ github.event.inputs.action == 'create' }}
