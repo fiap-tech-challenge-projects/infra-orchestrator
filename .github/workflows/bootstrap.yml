@@ -14,13 +14,15 @@ on:
 
 env:
   AWS_REGION: 'us-east-1'
-  STATE_BUCKET: 'fiap-tech-challenge-tf-state-118735037876'
   LOCK_TABLE: 'fiap-terraform-locks'
 
 jobs:
   bootstrap:
     name: Bootstrap Terraform Backend
     runs-on: ubuntu-latest
+    outputs:
+      state_bucket: ${{ steps.set-bucket.outputs.bucket }}
+      account_id: ${{ steps.set-bucket.outputs.account_id }}
     steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -30,27 +32,37 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Get AWS Account ID and Set Bucket Name
+        id: set-bucket
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          STATE_BUCKET="fiap-tech-challenge-tf-state-${ACCOUNT_ID}"
+          echo "account_id=${ACCOUNT_ID}" >> $GITHUB_OUTPUT
+          echo "bucket=${STATE_BUCKET}" >> $GITHUB_OUTPUT
+          echo "STATE_BUCKET=${STATE_BUCKET}" >> $GITHUB_ENV
+          echo "AWS Account ID: ${ACCOUNT_ID}"
+          echo "State Bucket: ${STATE_BUCKET}"
+
       - name: Create S3 Bucket
         if: ${{ github.event.inputs.action == 'create' }}
         run: |
-          # Check if bucket exists (handle AccessDenied as "exists")
-          echo "Checking if bucket ${{ env.STATE_BUCKET }} exists..."
+          echo "Creating S3 bucket: ${STATE_BUCKET}"
 
-          # Try to list bucket - this will fail with NoSuchBucket if it doesn't exist
-          # or AccessDenied if it exists but is owned by another account
-          if aws s3 ls s3://${{ env.STATE_BUCKET }} 2>&1 | grep -q "NoSuchBucket"; then
-            echo "Bucket does not exist. Creating bucket ${{ env.STATE_BUCKET }}"
-
-            aws s3 mb s3://${{ env.STATE_BUCKET }} --region ${{ env.AWS_REGION }}
+          # Check if bucket exists in current account
+          if aws s3api head-bucket --bucket "${STATE_BUCKET}" 2>/dev/null; then
+            echo "✓ Bucket ${STATE_BUCKET} already exists in current account"
+          else
+            echo "Creating new bucket ${STATE_BUCKET}"
+            aws s3 mb "s3://${STATE_BUCKET}" --region ${{ env.AWS_REGION }}
 
             # Enable versioning
             aws s3api put-bucket-versioning \
-              --bucket ${{ env.STATE_BUCKET }} \
+              --bucket "${STATE_BUCKET}" \
               --versioning-configuration Status=Enabled
 
             # Enable encryption
             aws s3api put-bucket-encryption \
-              --bucket ${{ env.STATE_BUCKET }} \
+              --bucket "${STATE_BUCKET}" \
               --server-side-encryption-configuration '{
                 "Rules": [{
                   "ApplyServerSideEncryptionByDefault": {
@@ -61,7 +73,7 @@ jobs:
 
             # Block public access
             aws s3api put-public-access-block \
-              --bucket ${{ env.STATE_BUCKET }} \
+              --bucket "${STATE_BUCKET}" \
               --public-access-block-configuration '{
                 "BlockPublicAcls": true,
                 "IgnorePublicAcls": true,
@@ -69,24 +81,19 @@ jobs:
                 "RestrictPublicBuckets": true
               }'
 
-            echo "Bucket created successfully"
-          else
-            echo "Bucket ${{ env.STATE_BUCKET }} already exists or is accessible"
+            echo "✓ Bucket created successfully"
           fi
 
       - name: Create DynamoDB Table
         if: ${{ github.event.inputs.action == 'create' }}
         run: |
-          # Check if table exists (handle AccessDenied as "exists")
-          echo "Checking if DynamoDB table ${{ env.LOCK_TABLE }} exists..."
+          echo "Creating DynamoDB table: ${{ env.LOCK_TABLE }}"
 
-          # Try to describe table - this will fail with ResourceNotFoundException if it doesn't exist
-          # or AccessDeniedException if it exists but is owned by another account
-          ERROR=$(aws dynamodb describe-table --table-name ${{ env.LOCK_TABLE }} --region ${{ env.AWS_REGION }} 2>&1 || true)
-
-          if echo "$ERROR" | grep -q "ResourceNotFoundException"; then
-            echo "Table does not exist. Creating DynamoDB table ${{ env.LOCK_TABLE }}"
-
+          # Check if table exists
+          if aws dynamodb describe-table --table-name ${{ env.LOCK_TABLE }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✓ Table ${{ env.LOCK_TABLE }} already exists"
+          else
+            echo "Creating new table ${{ env.LOCK_TABLE }}"
             aws dynamodb create-table \
               --table-name ${{ env.LOCK_TABLE }} \
               --attribute-definitions AttributeName=LockID,AttributeType=S \
@@ -96,9 +103,7 @@ jobs:
 
             # Wait for table to be active
             aws dynamodb wait table-exists --table-name ${{ env.LOCK_TABLE }} --region ${{ env.AWS_REGION }}
-            echo "Table created successfully"
-          else
-            echo "Table ${{ env.LOCK_TABLE }} already exists or is accessible"
+            echo "✓ Table created successfully"
           fi
 
       - name: Destroy DynamoDB Table
@@ -115,22 +120,22 @@ jobs:
       - name: Destroy S3 Bucket
         if: ${{ github.event.inputs.action == 'destroy' }}
         run: |
-          if aws s3api head-bucket --bucket ${{ env.STATE_BUCKET }} 2>/dev/null; then
-            echo "Emptying and deleting bucket ${{ env.STATE_BUCKET }}"
+          if aws s3api head-bucket --bucket "${STATE_BUCKET}" 2>/dev/null; then
+            echo "Emptying and deleting bucket ${STATE_BUCKET}"
             # Empty the bucket first (including versions)
-            aws s3 rm s3://${{ env.STATE_BUCKET }} --recursive
+            aws s3 rm "s3://${STATE_BUCKET}" --recursive
             # Delete all versions
-            aws s3api list-object-versions --bucket ${{ env.STATE_BUCKET }} \
+            aws s3api list-object-versions --bucket "${STATE_BUCKET}" \
               --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json | \
               jq -r '.[] | "\(.Key) \(.VersionId)"' | \
               while read key version; do
-                aws s3api delete-object --bucket ${{ env.STATE_BUCKET }} --key "$key" --version-id "$version"
+                aws s3api delete-object --bucket "${STATE_BUCKET}" --key "$key" --version-id "$version"
               done
             # Delete the bucket
-            aws s3 rb s3://${{ env.STATE_BUCKET }}
-            echo "Bucket deleted"
+            aws s3 rb "s3://${STATE_BUCKET}"
+            echo "✓ Bucket deleted"
           else
-            echo "Bucket ${{ env.STATE_BUCKET }} does not exist"
+            echo "Bucket ${STATE_BUCKET} does not exist"
           fi
 
       - name: Summary
@@ -141,11 +146,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ github.event.inputs.action }}" == "create" ]; then
             echo "### Resources Created" >> $GITHUB_STEP_SUMMARY
-            echo "- **S3 Bucket:** \`${{ env.STATE_BUCKET }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **AWS Account ID:** \`${{ steps.set-bucket.outputs.account_id }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **S3 Bucket:** \`${STATE_BUCKET}\`" >> $GITHUB_STEP_SUMMARY
             echo "- **DynamoDB Table:** \`${{ env.LOCK_TABLE }}\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-            echo "Run the **Deploy All Infrastructure** workflow to deploy all components." >> $GITHUB_STEP_SUMMARY
+            echo "1. Update all Terraform backend configs to use bucket: \`${STATE_BUCKET}\`" >> $GITHUB_STEP_SUMMARY
+            echo "2. Run the **Deploy All Infrastructure** workflow to deploy all components." >> $GITHUB_STEP_SUMMARY
           else
             echo "### Resources Destroyed" >> $GITHUB_STEP_SUMMARY
             echo "- S3 Bucket and DynamoDB Table have been removed" >> $GITHUB_STEP_SUMMARY

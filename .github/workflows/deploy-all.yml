@@ -45,6 +45,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       environment: ${{ github.event.inputs.environment }}
+      state_bucket: ${{ steps.set-bucket.outputs.bucket }}
+      account_id: ${{ steps.set-bucket.outputs.account_id }}
     steps:
       - name: Validate AWS Credentials
         run: |
@@ -59,7 +61,7 @@ jobs:
           if [ -z "${{ secrets.AWS_SESSION_TOKEN }}" ]; then
             echo "::warning::AWS_SESSION_TOKEN not configured (required for AWS Academy)"
           fi
-          echo "AWS credentials configured"
+          echo "✓ AWS credentials configured"
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -69,33 +71,41 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Get AWS Account ID and Set Bucket Name
+        id: set-bucket
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          STATE_BUCKET="fiap-tech-challenge-tf-state-${ACCOUNT_ID}"
+          echo "account_id=${ACCOUNT_ID}" >> $GITHUB_OUTPUT
+          echo "bucket=${STATE_BUCKET}" >> $GITHUB_OUTPUT
+          echo "STATE_BUCKET=${STATE_BUCKET}" >> $GITHUB_ENV
+          echo "AWS Account ID: ${ACCOUNT_ID}"
+          echo "State Bucket: ${STATE_BUCKET}"
+
       - name: Check S3 Backend Exists
         run: |
-          if aws s3 ls "s3://fiap-tech-challenge-tf-state-118735037876" 2>&1 | grep -q 'NoSuchBucket'; then
-            echo "::error::Terraform state bucket does not exist. Run bootstrap first!"
+          if ! aws s3api head-bucket --bucket "${STATE_BUCKET}" 2>/dev/null; then
+            echo "::error::Terraform state bucket ${STATE_BUCKET} does not exist. Run bootstrap first!"
             exit 1
           fi
-          echo "Terraform state bucket exists"
+          echo "✓ Terraform state bucket exists: ${STATE_BUCKET}"
 
       - name: Check DynamoDB Lock Table
         run: |
-          # Try to describe table - only fail if ResourceNotFoundException
-          ERROR=$(aws dynamodb describe-table --table-name fiap-terraform-locks 2>&1 || true)
-
-          if echo "$ERROR" | grep -q "ResourceNotFoundException"; then
+          if ! aws dynamodb describe-table --table-name fiap-terraform-locks --region ${{ env.AWS_REGION }} 2>/dev/null; then
             echo "::error::DynamoDB lock table does not exist. Run bootstrap first!"
             exit 1
           fi
-
-          echo "DynamoDB lock table exists"
+          echo "✓ DynamoDB lock table exists"
 
       - name: Summary
         run: |
           echo "## Prerequisites Validated" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **S3 Backend:** Exists" >> $GITHUB_STEP_SUMMARY
-          echo "- **DynamoDB Lock:** Exists" >> $GITHUB_STEP_SUMMARY
+          echo "- **AWS Account ID:** \`${{ steps.set-bucket.outputs.account_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **S3 Backend:** \`${STATE_BUCKET}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **DynamoDB Lock:** \`fiap-terraform-locks\`" >> $GITHUB_STEP_SUMMARY
           echo "- **AWS Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------------
