@@ -87,7 +87,7 @@ cleanup_eks_cluster() {
         if [ -n "$nodegroups" ]; then
             for ng in $nodegroups; do
                 print_info "Deleting node group: $ng"
-                aws eks delete-nodegroup --cluster-name "$cluster_name" --nodegroup-name "$ng" --region "$REGION" 2>/dev/null || true
+                aws eks delete-nodegroup --cluster-name "$cluster_name" --nodegroup-name "$ng" --region "$REGION" > /dev/null 2>&1 || true
             done
             print_info "Waiting 60s for node groups..."
             sleep 60
@@ -95,10 +95,10 @@ cleanup_eks_cluster() {
 
         # Delete cluster
         print_info "Deleting EKS cluster..."
-        aws eks delete-cluster --name "$cluster_name" --region "$REGION" 2>/dev/null || true
+        aws eks delete-cluster --name "$cluster_name" --region "$REGION" > /dev/null 2>&1 || true
 
         print_info "Waiting for cluster deletion..."
-        aws eks wait cluster-deleted --name "$cluster_name" --region "$REGION" 2>/dev/null || true
+        aws eks wait cluster-deleted --name "$cluster_name" --region "$REGION" > /dev/null 2>&1 || true
 
         print_success "EKS cluster deleted"
     else
@@ -117,10 +117,10 @@ cleanup_rds() {
         aws rds delete-db-instance \
             --db-instance-identifier "$db_identifier" \
             --skip-final-snapshot \
-            --region "$REGION" 2>/dev/null || true
+            --region "$REGION" > /dev/null 2>&1 || true
 
         print_info "Waiting for RDS deletion..."
-        aws rds wait db-instance-deleted --db-instance-identifier "$db_identifier" --region "$REGION" 2>/dev/null || true
+        aws rds wait db-instance-deleted --db-instance-identifier "$db_identifier" --region "$REGION" > /dev/null 2>&1 || true
 
         print_success "RDS deleted"
     else
@@ -136,7 +136,7 @@ cleanup_lambda() {
     if [ -n "$functions" ]; then
         for func in $functions; do
             print_info "Deleting: $func"
-            aws lambda delete-function --function-name "$func" --region "$REGION" 2>/dev/null || true
+            aws lambda delete-function --function-name "$func" --region "$REGION" > /dev/null 2>&1 || true
         done
         print_success "Lambdas deleted"
     else
@@ -268,7 +268,7 @@ cleanup_secrets() {
     if [ -n "$secrets" ]; then
         for secret in $secrets; do
             print_info "Deleting: $secret"
-            aws secretsmanager delete-secret --secret-id "$secret" --force-delete-without-recovery --region "$REGION" 2>/dev/null || true
+            aws secretsmanager delete-secret --secret-id "$secret" --force-delete-without-recovery --region "$REGION" > /dev/null 2>&1 || true
         done
         print_success "Secrets deleted"
     else
@@ -283,7 +283,7 @@ cleanup_kms_aliases() {
     local alias_name="alias/${PROJECT_NAME}-eks-${ENVIRONMENT}"
 
     print_info "Attempting to delete KMS alias: $alias_name"
-    if aws kms delete-alias --alias-name "$alias_name" --region "$REGION" 2>/dev/null; then
+    if aws kms delete-alias --alias-name "$alias_name" --region "$REGION" > /dev/null 2>&1; then
         print_success "KMS alias deleted"
     else
         print_info "KMS alias not found or already deleted"
@@ -299,7 +299,7 @@ cleanup_cloudwatch_logs() {
     if [ -n "$log_groups" ]; then
         for log_group in $log_groups; do
             print_info "Deleting log group: $log_group"
-            aws logs delete-log-group --log-group-name "$log_group" --region "$REGION" 2>/dev/null || true
+            aws logs delete-log-group --log-group-name "$log_group" --region "$REGION" > /dev/null 2>&1 || true
         done
         print_success "CloudWatch log groups deleted"
     else
