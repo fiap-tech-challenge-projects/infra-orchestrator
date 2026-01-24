@@ -282,12 +282,11 @@ cleanup_kms_aliases() {
     # Delete KMS alias for EKS
     local alias_name="alias/${PROJECT_NAME}-eks-${ENVIRONMENT}"
 
-    if aws kms describe-alias --alias-name "$alias_name" --region "$REGION" 2>/dev/null; then
-        print_info "Deleting KMS alias: $alias_name"
-        aws kms delete-alias --alias-name "$alias_name" --region "$REGION" 2>/dev/null || true
+    print_info "Attempting to delete KMS alias: $alias_name"
+    if aws kms delete-alias --alias-name "$alias_name" --region "$REGION" 2>/dev/null; then
         print_success "KMS alias deleted"
     else
-        print_info "No KMS alias found"
+        print_info "KMS alias not found or already deleted"
     fi
 }
 
