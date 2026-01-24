@@ -14,7 +14,6 @@ on:
 
 env:
   AWS_REGION: 'us-east-1'
-  STATE_BUCKET: 'fiap-tech-challenge-tf-state-118735037876'
   LOCK_TABLE: 'fiap-terraform-locks'
 
 jobs:
@@ -29,6 +28,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set Bucket Name
+        id: bucket
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+          echo "STATE_BUCKET=fiap-tech-challenge-tf-state-${ACCOUNT_ID}" >> $GITHUB_ENV
+          echo "Using bucket: fiap-tech-challenge-tf-state-${ACCOUNT_ID}"
 
       - name: Create S3 Bucket
         if: ${{ github.event.inputs.action == 'create' }}
