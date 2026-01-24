@@ -77,11 +77,16 @@ jobs:
       - name: Create DynamoDB Table
         if: ${{ github.event.inputs.action == 'create' }}
         run: |
-          # Check if table exists
-          if aws dynamodb describe-table --table-name ${{ env.LOCK_TABLE }} 2>/dev/null; then
-            echo "Table ${{ env.LOCK_TABLE }} already exists"
-          else
-            echo "Creating DynamoDB table ${{ env.LOCK_TABLE }}"
+          # Check if table exists (handle AccessDenied as "exists")
+          echo "Checking if DynamoDB table ${{ env.LOCK_TABLE }} exists..."
+
+          # Try to describe table - this will fail with ResourceNotFoundException if it doesn't exist
+          # or AccessDeniedException if it exists but is owned by another account
+          ERROR=$(aws dynamodb describe-table --table-name ${{ env.LOCK_TABLE }} --region ${{ env.AWS_REGION }} 2>&1 || true)
+
+          if echo "$ERROR" | grep -q "ResourceNotFoundException"; then
+            echo "Table does not exist. Creating DynamoDB table ${{ env.LOCK_TABLE }}"
+
             aws dynamodb create-table \
               --table-name ${{ env.LOCK_TABLE }} \
               --attribute-definitions AttributeName=LockID,AttributeType=S \
@@ -90,8 +95,10 @@ jobs:
               --region ${{ env.AWS_REGION }}
 
             # Wait for table to be active
-            aws dynamodb wait table-exists --table-name ${{ env.LOCK_TABLE }}
+            aws dynamodb wait table-exists --table-name ${{ env.LOCK_TABLE }} --region ${{ env.AWS_REGION }}
             echo "Table created successfully"
+          else
+            echo "Table ${{ env.LOCK_TABLE }} already exists or is accessible"
           fi
 
       - name: Destroy DynamoDB Table
