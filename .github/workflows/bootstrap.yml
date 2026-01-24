@@ -33,11 +33,14 @@ jobs:
       - name: Create S3 Bucket
         if: ${{ github.event.inputs.action == 'create' }}
         run: |
-          # Check if bucket exists
-          if aws s3api head-bucket --bucket ${{ env.STATE_BUCKET }} 2>/dev/null; then
-            echo "Bucket ${{ env.STATE_BUCKET }} already exists"
-          else
-            echo "Creating bucket ${{ env.STATE_BUCKET }}"
+          # Check if bucket exists (handle AccessDenied as "exists")
+          echo "Checking if bucket ${{ env.STATE_BUCKET }} exists..."
+
+          # Try to list bucket - this will fail with NoSuchBucket if it doesn't exist
+          # or AccessDenied if it exists but is owned by another account
+          if aws s3 ls s3://${{ env.STATE_BUCKET }} 2>&1 | grep -q "NoSuchBucket"; then
+            echo "Bucket does not exist. Creating bucket ${{ env.STATE_BUCKET }}"
+
             aws s3 mb s3://${{ env.STATE_BUCKET }} --region ${{ env.AWS_REGION }}
 
             # Enable versioning
@@ -67,6 +70,8 @@ jobs:
               }'
 
             echo "Bucket created successfully"
+          else
+            echo "Bucket ${{ env.STATE_BUCKET }} already exists or is accessible"
           fi
 
       - name: Create DynamoDB Table
