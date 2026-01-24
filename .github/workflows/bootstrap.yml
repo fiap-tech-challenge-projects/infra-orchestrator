@@ -169,16 +169,43 @@ jobs:
         run: |
           if aws s3api head-bucket --bucket "${STATE_BUCKET}" 2>/dev/null; then
             echo "Emptying and deleting bucket ${STATE_BUCKET}"
-            # Empty the bucket first (including versions)
-            aws s3 rm "s3://${STATE_BUCKET}" --recursive
-            # Delete all versions
-            aws s3api list-object-versions --bucket "${STATE_BUCKET}" \
-              --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json | \
-              jq -r '.[] | "\(.Key) \(.VersionId)"' | \
-              while read key version; do
-                aws s3api delete-object --bucket "${STATE_BUCKET}" --key "$key" --version-id "$version"
+
+            # Delete all object versions
+            echo "Deleting object versions..."
+            aws s3api list-object-versions \
+              --bucket "${STATE_BUCKET}" \
+              --output json \
+              --query 'Versions[].{Key:Key,VersionId:VersionId}' | \
+              jq -r '.[] | [.Key, .VersionId] | @tsv' | \
+              while IFS=$'\t' read -r key version; do
+                echo "  Deleting: $key (version: $version)"
+                aws s3api delete-object \
+                  --bucket "${STATE_BUCKET}" \
+                  --key "$key" \
+                  --version-id "$version" > /dev/null
               done
+
+            # Delete all delete markers
+            echo "Deleting delete markers..."
+            aws s3api list-object-versions \
+              --bucket "${STATE_BUCKET}" \
+              --output json \
+              --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' | \
+              jq -r '.[] | [.Key, .VersionId] | @tsv' | \
+              while IFS=$'\t' read -r key version; do
+                echo "  Deleting marker: $key (version: $version)"
+                aws s3api delete-object \
+                  --bucket "${STATE_BUCKET}" \
+                  --key "$key" \
+                  --version-id "$version" > /dev/null
+              done
+
+            # Delete current objects
+            echo "Deleting current objects..."
+            aws s3 rm "s3://${STATE_BUCKET}" --recursive
+
             # Delete the bucket
+            echo "Deleting bucket..."
             aws s3 rb "s3://${STATE_BUCKET}"
             echo "✓ Bucket deleted"
           else
