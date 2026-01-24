@@ -5,6 +5,9 @@
 # Forcefully deletes all AWS resources for FIAP Tech Challenge
 # =============================================================================
 
+# Disable AWS CLI pager
+export AWS_PAGER=""
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
