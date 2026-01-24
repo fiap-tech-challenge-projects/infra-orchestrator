@@ -166,7 +166,7 @@ cleanup_vpc_aggressive() {
         print_info "  Deleting NAT Gateways..."
         local nats=$(aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$vpc_id" --region "$REGION" --query 'NatGateways[*].NatGatewayId' --output text)
         for nat in $nats; do
-            aws ec2 delete-nat-gateway --nat-gateway-id "$nat" --region "$REGION" 2>/dev/null || true
+            aws ec2 delete-nat-gateway --nat-gateway-id "$nat" --region "$REGION" > /dev/null 2>&1 || true
         done
         [ -n "$nats" ] && sleep 90
 
@@ -182,7 +182,7 @@ cleanup_vpc_aggressive() {
         local endpoints=$(aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$vpc_id" --region "$REGION" --query 'VpcEndpoints[*].VpcEndpointId' --output text)
         if [ -n "$endpoints" ]; then
             for endpoint in $endpoints; do
-                aws ec2 delete-vpc-endpoints --vpc-endpoint-ids "$endpoint" --region "$REGION" 2>/dev/null || true
+                aws ec2 delete-vpc-endpoints --vpc-endpoint-ids "$endpoint" --region "$REGION" > /dev/null 2>&1 || true
             done
             sleep 10
         fi
@@ -206,18 +206,18 @@ cleanup_vpc_aggressive() {
         for sg in $sgs; do
             aws ec2 describe-security-groups --group-ids "$sg" --region "$REGION" --query 'SecurityGroups[0].IpPermissions' --output json 2>/dev/null | \
                 jq -c '.[]?' 2>/dev/null | while read rule; do
-                    aws ec2 revoke-security-group-ingress --group-id "$sg" --ip-permissions "$rule" --region "$REGION" 2>/dev/null || true
+                    aws ec2 revoke-security-group-ingress --group-id "$sg" --ip-permissions "$rule" --region "$REGION" > /dev/null 2>&1 || true
                 done
 
             aws ec2 describe-security-groups --group-ids "$sg" --region "$REGION" --query 'SecurityGroups[0].IpPermissionsEgress' --output json 2>/dev/null | \
                 jq -c '.[]?' 2>/dev/null | while read rule; do
-                    aws ec2 revoke-security-group-egress --group-id "$sg" --ip-permissions "$rule" --region "$REGION" 2>/dev/null || true
+                    aws ec2 revoke-security-group-egress --group-id "$sg" --ip-permissions "$rule" --region "$REGION" > /dev/null 2>&1 || true
                 done
         done
 
         # Delete security groups
         for sg in $sgs; do
-            retry aws ec2 delete-security-group --group-id "$sg" --region "$REGION" 2>/dev/null
+            retry aws ec2 delete-security-group --group-id "$sg" --region "$REGION" > /dev/null 2>&1
         done
 
         # 6. Route Table Associations (AGGRESSIVE)
@@ -230,7 +230,7 @@ cleanup_vpc_aggressive() {
 
             for assoc in $assocs; do
                 print_info "    Disassociating: $assoc"
-                aws ec2 disassociate-route-table --association-id "$assoc" --region "$REGION" 2>/dev/null || true
+                aws ec2 disassociate-route-table --association-id "$assoc" --region "$REGION" > /dev/null 2>&1 || true
             done
 
             # Delete the route table
