@@ -140,7 +140,7 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 60; // 30 minutes max
+            const maxAttempts = 120; // 60 minutes max (EKS takes 40-50 min)
             let attempts = 0;
 
             while (attempts < maxAttempts) {
