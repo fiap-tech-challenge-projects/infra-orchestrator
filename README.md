@@ -40,6 +40,31 @@ Para criar:
 3. Selecione `repo` e `workflow`
 4. Copie o token e adicione como secret `GH_PAT` em todos os repos
 
+### 3. Armazenamento Local de Secrets
+
+Para facilitar o gerenciamento, os secrets podem ser armazenados localmente:
+
+**Arquivo:** `.env.local` (ja esta no .gitignore)
+```bash
+# Token GH_PAT armazenado localmente (nao comitado)
+GH_PAT=ghp_xxxxxxxxxxxxxxxxxxxxx
+```
+
+**Scripts Uteis:**
+
+```bash
+# Atualizar secrets AWS em todos os 6 repos
+./scripts/update-github-secrets.sh
+
+# Atualizar apenas GH_PAT em todos os repos (le de .env.local)
+./scripts/update-gh-pat.sh
+```
+
+O script `update-gh-pat.sh`:
+- Le o token de `.env.local`
+- Atualiza em todos os 6 repositorios automaticamente
+- Evita expor o token no terminal
+
 ## Workflows Disponiveis
 
 ### 1. Bootstrap (`bootstrap.yml`)

@@ -18,6 +18,7 @@ NC='\033[0m'
 # Repositories to update
 REPOS=(
     "kubernetes-core-infra"
+    "kubernetes-addons"
     "database-managed-infra"
     "lambda-api-handler"
     "k8s-main-service"
