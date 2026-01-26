@@ -153,18 +153,18 @@ update_repo_secrets() {
     echo -ne "  ${repo}... "
 
     # Check if repo exists
-    if ! gh repo view "$full_repo" &> /dev/null 2>&1; then
+    if ! gh repo view "$full_repo" &> /dev/null; then
         echo -e "${YELLOW}not found, skipping${NC}"
         return
     fi
 
-    # Update secrets
-    echo "$AWS_ACCESS_KEY_ID" | gh secret set AWS_ACCESS_KEY_ID -R "$full_repo" 2>/dev/null
-    echo "$AWS_SECRET_ACCESS_KEY" | gh secret set AWS_SECRET_ACCESS_KEY -R "$full_repo" 2>/dev/null
-    echo "$AWS_SESSION_TOKEN" | gh secret set AWS_SESSION_TOKEN -R "$full_repo" 2>/dev/null
+    # Update secrets (suppress all output)
+    echo "$AWS_ACCESS_KEY_ID" | gh secret set AWS_ACCESS_KEY_ID -R "$full_repo" &>/dev/null
+    echo "$AWS_SECRET_ACCESS_KEY" | gh secret set AWS_SECRET_ACCESS_KEY -R "$full_repo" &>/dev/null
+    echo "$AWS_SESSION_TOKEN" | gh secret set AWS_SESSION_TOKEN -R "$full_repo" &>/dev/null
 
     if [[ -n "$AWS_ACCOUNT_ID" ]]; then
-        echo "$AWS_ACCOUNT_ID" | gh secret set AWS_ACCOUNT_ID -R "$full_repo" 2>/dev/null
+        echo "$AWS_ACCOUNT_ID" | gh secret set AWS_ACCOUNT_ID -R "$full_repo" &>/dev/null
     fi
 
     echo -e "${GREEN}✓${NC}"
