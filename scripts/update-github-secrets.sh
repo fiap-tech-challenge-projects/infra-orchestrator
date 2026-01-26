@@ -170,6 +170,50 @@ update_repo_secrets() {
     echo -e "${GREEN}✓${NC}"
 }
 
+update_local_aws_credentials() {
+    local aws_dir="$HOME/.aws"
+    local creds_file="$aws_dir/credentials"
+    local config_file="$aws_dir/config"
+
+    echo -e "${CYAN}Updating local AWS credentials...${NC}"
+
+    # Create .aws directory if it doesn't exist
+    mkdir -p "$aws_dir"
+
+    # Backup existing credentials
+    if [[ -f "$creds_file" ]]; then
+        cp "$creds_file" "${creds_file}.backup.$(date +%Y%m%d%H%M%S)"
+        echo -e "  ${YELLOW}Backup created: ${creds_file}.backup.*${NC}"
+    fi
+
+    # Write credentials
+    cat > "$creds_file" << EOF
+[default]
+aws_access_key_id = ${AWS_ACCESS_KEY_ID}
+aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
+aws_session_token = ${AWS_SESSION_TOKEN}
+EOF
+
+    # Set restrictive permissions
+    chmod 600 "$creds_file"
+
+    # Update/create config file
+    if [[ ! -f "$config_file" ]]; then
+        cat > "$config_file" << EOF
+[default]
+region = us-east-1
+output = json
+EOF
+        chmod 600 "$config_file"
+    fi
+
+    echo -e "  ${GREEN}✓ Local credentials updated: $creds_file${NC}"
+    echo -e "  ${GREEN}✓ Region: us-east-1${NC}"
+    if [[ -n "$AWS_ACCOUNT_ID" ]]; then
+        echo -e "  ${GREEN}✓ Account ID: ${AWS_ACCOUNT_ID}${NC}"
+    fi
+}
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -195,6 +239,11 @@ case $choice in
         ;;
 esac
 
+# Update local AWS credentials
+echo ""
+update_local_aws_credentials
+
+# Update GitHub secrets
 echo -e "\n${YELLOW}Updating secrets in ${#REPOS[@]} repositories...${NC}\n"
 
 for repo in "${REPOS[@]}"; do
@@ -202,6 +251,9 @@ for repo in "${REPOS[@]}"; do
 done
 
 echo -e "\n${GREEN}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  All secrets updated successfully!${NC}"
+echo -e "${GREEN}  All credentials updated successfully!${NC}"
+echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}  ✓ Local AWS credentials: ~/.aws/credentials${NC}"
+echo -e "${GREEN}  ✓ GitHub secrets: ${#REPOS[@]} repositories${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
 echo -e "\n${YELLOW}⚠ Remember: AWS Academy tokens expire in ~4 hours${NC}\n"
