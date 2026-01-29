@@ -98,9 +98,10 @@ get_aws_academy_credentials() {
     read -p "AWS_SESSION_TOKEN: " AWS_SESSION_TOKEN
     read -p "AWS_ACCOUNT_ID (12 digits): " AWS_ACCOUNT_ID
 
-    # Validate
-    if [[ -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" || -z "$AWS_SESSION_TOKEN" ]]; then
+    # Validate required credentials (session token optional for non-Academy accounts)
+    if [[ -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" ]]; then
         echo -e "${RED}Error: AWS credentials are required${NC}"
+        echo "Please provide at minimum: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
         exit 1
     fi
 
@@ -161,7 +162,11 @@ update_repo_secrets() {
     # Update secrets (suppress all output)
     echo "$AWS_ACCESS_KEY_ID" | gh secret set AWS_ACCESS_KEY_ID -R "$full_repo" &>/dev/null
     echo "$AWS_SECRET_ACCESS_KEY" | gh secret set AWS_SECRET_ACCESS_KEY -R "$full_repo" &>/dev/null
-    echo "$AWS_SESSION_TOKEN" | gh secret set AWS_SESSION_TOKEN -R "$full_repo" &>/dev/null
+
+    # Only set session token if it exists (AWS Academy)
+    if [[ -n "$AWS_SESSION_TOKEN" ]]; then
+        echo "$AWS_SESSION_TOKEN" | gh secret set AWS_SESSION_TOKEN -R "$full_repo" &>/dev/null
+    fi
 
     if [[ -n "$AWS_ACCOUNT_ID" ]]; then
         echo "$AWS_ACCOUNT_ID" | gh secret set AWS_ACCOUNT_ID -R "$full_repo" &>/dev/null
@@ -191,8 +196,12 @@ update_local_aws_credentials() {
 [default]
 aws_access_key_id = ${AWS_ACCESS_KEY_ID}
 aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
-aws_session_token = ${AWS_SESSION_TOKEN}
 EOF
+
+    # Add session token only if it exists (AWS Academy)
+    if [[ -n "$AWS_SESSION_TOKEN" ]]; then
+        echo "aws_session_token = ${AWS_SESSION_TOKEN}" >> "$creds_file"
+    fi
 
     # Set restrictive permissions
     chmod 600 "$creds_file"
@@ -218,26 +227,56 @@ EOF
 # Main
 # =============================================================================
 
+load_from_env_local() {
+    local env_file="../.env.local"
+
+    if [[ ! -f "$env_file" ]]; then
+        return 1
+    fi
+
+    # Source the .env.local file
+    source "$env_file"
+
+    if [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" && -n "$AWS_ACCOUNT_ID" ]]; then
+        echo -e "\n${GREEN}✓ Loaded credentials from .env.local${NC}"
+        echo -e "  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:0:20}..."
+        echo -e "  AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID}"
+
+        read -p "Use these credentials? [Y/n]: " use_env
+        if [[ "$use_env" =~ ^[Nn] ]]; then
+            return 1
+        fi
+        return 0
+    fi
+
+    return 1
+}
+
 print_header
 check_gh_cli
 get_github_owner
 
-echo -e "\n${CYAN}How do you want to enter credentials?${NC}"
-echo "  1) Enter values one by one"
-echo "  2) Paste AWS Academy block"
-read -p "Choice [1/2]: " choice
+# Try to load from .env.local first
+if load_from_env_local; then
+    echo -e "${GREEN}Using credentials from .env.local${NC}"
+else
+    echo -e "\n${CYAN}How do you want to enter credentials?${NC}"
+    echo "  1) Enter values one by one"
+    echo "  2) Paste AWS Academy block"
+    read -p "Choice [1/2]: " choice
 
-case $choice in
-    2)
-        if ! parse_aws_academy_block; then
-            echo -e "${YELLOW}Could not parse block, falling back to manual entry${NC}"
+    case $choice in
+        2)
+            if ! parse_aws_academy_block; then
+                echo -e "${YELLOW}Could not parse block, falling back to manual entry${NC}"
+                get_aws_academy_credentials
+            fi
+            ;;
+        *)
             get_aws_academy_credentials
-        fi
-        ;;
-    *)
-        get_aws_academy_credentials
-        ;;
-esac
+            ;;
+    esac
+fi
 
 # Update local AWS credentials
 echo ""
@@ -256,4 +295,9 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}  ✓ Local AWS credentials: ~/.aws/credentials${NC}"
 echo -e "${GREEN}  ✓ GitHub secrets: ${#REPOS[@]} repositories${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-echo -e "\n${YELLOW}⚠ Remember: AWS Academy tokens expire in ~4 hours${NC}\n"
+
+if [[ -n "$AWS_SESSION_TOKEN" ]]; then
+    echo -e "\n${YELLOW}⚠ Remember: AWS Academy tokens expire in ~4 hours${NC}\n"
+else
+    echo -e "\n${CYAN}Using non-Academy AWS account (no session token expiration)${NC}\n"
+fi
