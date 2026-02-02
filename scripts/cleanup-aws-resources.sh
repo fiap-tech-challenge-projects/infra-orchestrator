@@ -144,6 +144,88 @@ cleanup_lambda() {
     fi
 }
 
+cleanup_ecr() {
+    print_step "Cleaning up ECR repositories..."
+
+    local repos=$(aws ecr describe-repositories --region "$REGION" --query "repositories[?contains(repositoryName, '${PROJECT_NAME}')].repositoryName" --output text 2>/dev/null)
+
+    if [ -n "$repos" ]; then
+        for repo in $repos; do
+            print_info "Deleting ECR repository: $repo"
+            # Force delete even with images
+            aws ecr delete-repository --repository-name "$repo" --region "$REGION" --force > /dev/null 2>&1 || true
+        done
+        print_success "ECR repositories deleted"
+    else
+        print_info "No ECR repositories found"
+    fi
+}
+
+cleanup_iam_roles_and_policies() {
+    print_step "Cleaning up IAM Roles and Policies..."
+
+    # List all roles with project name
+    local roles=$(aws iam list-roles --query "Roles[?contains(RoleName, '${PROJECT_NAME}')].RoleName" --output text 2>/dev/null)
+
+    if [ -n "$roles" ]; then
+        for role in $roles; do
+            print_info "Processing role: $role"
+
+            # Detach managed policies
+            local attached_policies=$(aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null)
+            for policy_arn in $attached_policies; do
+                print_info "  Detaching policy: $policy_arn"
+                aws iam detach-role-policy --role-name "$role" --policy-arn "$policy_arn" > /dev/null 2>&1 || true
+            done
+
+            # Delete inline policies
+            local inline_policies=$(aws iam list-role-policies --role-name "$role" --query 'PolicyNames[*]' --output text 2>/dev/null)
+            for policy_name in $inline_policies; do
+                print_info "  Deleting inline policy: $policy_name"
+                aws iam delete-role-policy --role-name "$role" --policy-name "$policy_name" > /dev/null 2>&1 || true
+            done
+
+            # Delete instance profiles
+            local instance_profiles=$(aws iam list-instance-profiles-for-role --role-name "$role" --query 'InstanceProfiles[*].InstanceProfileName' --output text 2>/dev/null)
+            for profile in $instance_profiles; do
+                print_info "  Removing from instance profile: $profile"
+                aws iam remove-role-from-instance-profile --instance-profile-name "$profile" --role-name "$role" > /dev/null 2>&1 || true
+                aws iam delete-instance-profile --instance-profile-name "$profile" > /dev/null 2>&1 || true
+            done
+
+            # Delete the role
+            print_info "  Deleting role: $role"
+            aws iam delete-role --role-name "$role" > /dev/null 2>&1 || true
+        done
+        print_success "IAM roles cleaned"
+    else
+        print_info "No IAM roles found"
+    fi
+
+    # Delete custom policies
+    print_step "Cleaning up IAM Policies..."
+    local account_id=$(aws sts get-caller-identity --query Account --output text)
+    local policies=$(aws iam list-policies --scope Local --query "Policies[?contains(PolicyName, '${PROJECT_NAME}')].Arn" --output text 2>/dev/null)
+
+    if [ -n "$policies" ]; then
+        for policy_arn in $policies; do
+            print_info "Deleting policy: $policy_arn"
+
+            # Delete all policy versions except default
+            local versions=$(aws iam list-policy-versions --policy-arn "$policy_arn" --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null)
+            for version in $versions; do
+                aws iam delete-policy-version --policy-arn "$policy_arn" --version-id "$version" > /dev/null 2>&1 || true
+            done
+
+            # Delete the policy
+            aws iam delete-policy --policy-arn "$policy_arn" > /dev/null 2>&1 || true
+        done
+        print_success "IAM policies deleted"
+    else
+        print_info "No IAM policies found"
+    fi
+}
+
 cleanup_vpc_aggressive() {
     print_step "AGGRESSIVE VPC cleanup..."
 
@@ -323,6 +405,8 @@ cleanup_kms_aliases
 cleanup_cloudwatch_logs
 cleanup_vpc_aggressive
 cleanup_secrets
+cleanup_ecr
+cleanup_iam_roles_and_policies
 
 echo -e "\n${GREEN}═══════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  Cleanup completed!${NC}"
