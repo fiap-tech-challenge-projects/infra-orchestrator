@@ -211,6 +211,27 @@ cleanup_iam_roles_and_policies() {
         for policy_arn in $policies; do
             print_info "Deleting policy: $policy_arn"
 
+            # Detach from all roles
+            local attached_roles=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" --entity-filter Role --query 'PolicyRoles[*].RoleName' --output text 2>/dev/null)
+            for role in $attached_roles; do
+                print_info "  Detaching from role: $role"
+                aws iam detach-role-policy --role-name "$role" --policy-arn "$policy_arn" > /dev/null 2>&1 || true
+            done
+
+            # Detach from all users
+            local attached_users=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" --entity-filter User --query 'PolicyUsers[*].UserName' --output text 2>/dev/null)
+            for user in $attached_users; do
+                print_info "  Detaching from user: $user"
+                aws iam detach-user-policy --user-name "$user" --policy-arn "$policy_arn" > /dev/null 2>&1 || true
+            done
+
+            # Detach from all groups
+            local attached_groups=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" --entity-filter Group --query 'PolicyGroups[*].GroupName' --output text 2>/dev/null)
+            for group in $attached_groups; do
+                print_info "  Detaching from group: $group"
+                aws iam detach-group-policy --group-name "$group" --policy-arn "$policy_arn" > /dev/null 2>&1 || true
+            done
+
             # Delete all policy versions except default
             local versions=$(aws iam list-policy-versions --policy-arn "$policy_arn" --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null)
             for version in $versions; do
@@ -218,7 +239,7 @@ cleanup_iam_roles_and_policies() {
             done
 
             # Delete the policy
-            aws iam delete-policy --policy-arn "$policy_arn" > /dev/null 2>&1 || true
+            retry aws iam delete-policy --policy-arn "$policy_arn" > /dev/null 2>&1
         done
         print_success "IAM policies deleted"
     else
