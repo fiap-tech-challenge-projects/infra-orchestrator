@@ -337,12 +337,41 @@ jobs:
             console.log('⚠ EKS cluster destruction timed out');
 
   # ---------------------------------------------------------------------------
+  # Force Cleanup - Aggressive orphan resource cleanup
+  # ---------------------------------------------------------------------------
+  force-cleanup:
+    name: Force Cleanup Orphaned Resources
+    runs-on: ubuntu-latest
+    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, destroy-eks-cluster]
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Run aggressive cleanup script
+        run: |
+          chmod +x scripts/cleanup-aws-resources.sh
+          echo "DELETE" | ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}
+
+  # ---------------------------------------------------------------------------
   # Validate Resources Deleted
   # ---------------------------------------------------------------------------
   validate-cleanup:
     name: Validate Resources Deleted
     runs-on: ubuntu-latest
-    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, destroy-eks-cluster]
+    needs: [force-cleanup]
     if: always()
     steps:
       - name: Configure AWS Credentials
@@ -350,57 +379,69 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          # AWS_SESSION_TOKEN is optional (only required for AWS Academy)
-          # If not set, it will be empty and the action will ignore it
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Check for orphaned resources
+      - name: Final validation
         run: |
-          echo "Checking for orphaned AWS resources..."
+          echo "=== Final Validation ==="
+          echo ""
 
-          ORPHANED_RESOURCES=0
+          ORPHANED=0
 
-          # Check EKS cluster
+          # Check ECR
+          if aws ecr describe-repositories --region us-east-1 2>/dev/null | jq -r '.repositories[].repositoryName' | grep -q "fiap-tech-challenge"; then
+            echo "::warning::ECR repositories still exist!"
+            ORPHANED=$((ORPHANED + 1))
+          else
+            echo "✓ ECR clean"
+          fi
+
+          # Check EKS
           if aws eks describe-cluster --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }} --region us-east-1 &>/dev/null; then
             echo "::warning::EKS cluster still exists!"
-            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+            ORPHANED=$((ORPHANED + 1))
           else
-            echo "✓ EKS cluster deleted"
+            echo "✓ EKS clean"
           fi
 
           # Check RDS
           if aws rds describe-db-instances --db-instance-identifier fiap-tech-challenge-db-${{ github.event.inputs.environment }} --region us-east-1 &>/dev/null; then
-            echo "::warning::RDS instance still exists!"
-            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+            echo "::warning::RDS still exists!"
+            ORPHANED=$((ORPHANED + 1))
           else
-            echo "✓ RDS instance deleted"
+            echo "✓ RDS clean"
+          fi
+
+          # Check IAM Roles
+          if aws iam list-roles | jq -r '.Roles[].RoleName' | grep -q "fiap-tech-challenge"; then
+            echo "::warning::IAM roles still exist!"
+            ORPHANED=$((ORPHANED + 1))
+          else
+            echo "✓ IAM clean"
           fi
 
           # Check VPC
           vpc_id=$(aws ec2 describe-vpcs \
-            --filters "Name=tag:Project,Values=fiap-tech-challenge" "Name=tag:Environment,Values=${{ github.event.inputs.environment }}" \
+            --filters "Name=tag:Project,Values=fiap-tech-challenge" \
             --region us-east-1 \
             --query 'Vpcs[0].VpcId' \
             --output text 2>/dev/null || echo "None")
 
           if [ "$vpc_id" != "None" ] && [ -n "$vpc_id" ]; then
             echo "::warning::VPC still exists: $vpc_id"
-            echo "::warning::Run cleanup script: ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}"
-            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+            ORPHANED=$((ORPHANED + 1))
           else
-            echo "✓ VPC deleted"
+            echo "✓ VPC clean"
           fi
 
-          # Report summary
-          if [ $ORPHANED_RESOURCES -gt 0 ]; then
-            echo ""
-            echo "::error::Found $ORPHANED_RESOURCES orphaned resource(s)"
-            echo "::error::Manual cleanup required. Run: ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}"
+          echo ""
+          if [ $ORPHANED -gt 0 ]; then
+            echo "::error::Still found $ORPHANED orphaned resource(s) after aggressive cleanup!"
+            echo "::error::Manual intervention required."
             exit 1
           else
-            echo ""
-            echo "✓ All resources successfully deleted"
+            echo "✅ All resources successfully deleted!"
           fi
 
   # ---------------------------------------------------------------------------
