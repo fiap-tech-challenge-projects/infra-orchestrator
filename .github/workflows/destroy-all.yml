@@ -366,6 +366,61 @@ jobs:
           chmod +x scripts/cleanup-aws-resources.sh
           echo "DELETE" | ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }} || true
 
+      - name: Force delete orphaned IAM policies
+        continue-on-error: true
+        run: |
+          echo "=== Force deleting orphaned IAM policies ==="
+
+          # List all custom policies with project name
+          policies=$(aws iam list-policies --scope Local \
+            --query "Policies[?contains(PolicyName, 'fiap-tech-challenge')].Arn" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$policies" ]; then
+            for policy_arn in $policies; do
+              policy_name=$(echo "$policy_arn" | awk -F'/' '{print $NF}')
+              echo "Processing policy: $policy_name"
+
+              # Detach from all roles
+              attached_roles=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" \
+                --entity-filter Role --query 'PolicyRoles[*].RoleName' --output text 2>/dev/null || echo "")
+              for role in $attached_roles; do
+                echo "  Detaching from role: $role"
+                aws iam detach-role-policy --role-name "$role" --policy-arn "$policy_arn" 2>/dev/null || true
+              done
+
+              # Detach from all users
+              attached_users=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" \
+                --entity-filter User --query 'PolicyUsers[*].UserName' --output text 2>/dev/null || echo "")
+              for user in $attached_users; do
+                echo "  Detaching from user: $user"
+                aws iam detach-user-policy --user-name "$user" --policy-arn "$policy_arn" 2>/dev/null || true
+              done
+
+              # Detach from all groups
+              attached_groups=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" \
+                --entity-filter Group --query 'PolicyGroups[*].GroupName' --output text 2>/dev/null || echo "")
+              for group in $attached_groups; do
+                echo "  Detaching from group: $group"
+                aws iam detach-group-policy --group-name "$group" --policy-arn "$policy_arn" 2>/dev/null || true
+              done
+
+              # Delete all non-default versions
+              versions=$(aws iam list-policy-versions --policy-arn "$policy_arn" \
+                --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null || echo "")
+              for version in $versions; do
+                aws iam delete-policy-version --policy-arn "$policy_arn" --version-id "$version" 2>/dev/null || true
+              done
+
+              # Delete the policy
+              echo "  Deleting policy: $policy_name"
+              aws iam delete-policy --policy-arn "$policy_arn" 2>/dev/null || true
+            done
+            echo "✓ IAM policies cleaned"
+          else
+            echo "No orphaned policies found"
+          fi
+
   # ---------------------------------------------------------------------------
   # Validate Resources Deleted
   # ---------------------------------------------------------------------------
