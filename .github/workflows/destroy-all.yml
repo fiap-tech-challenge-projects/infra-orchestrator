@@ -281,12 +281,93 @@ jobs:
             console.log('⚠ K8s addons destruction timed out');
 
   # ---------------------------------------------------------------------------
+  # Step 4a.5: Clean Kubernetes Resources (before cluster destruction)
+  # ---------------------------------------------------------------------------
+  clean-k8s-resources:
+    name: "4a.5. Clean Kubernetes Resources"
+    runs-on: ubuntu-latest
+    needs: [validate, destroy-eks-addons]
+    if: always() && needs.validate.result == 'success'
+    continue-on-error: true
+    steps:
+      - name: Checkout k8s-main-service
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/k8s-main-service
+          ref: ${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Configure kubectl
+        continue-on-error: true
+        run: |
+          aws eks update-kubeconfig \
+            --region us-east-1 \
+            --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }}
+
+      - name: Delete Kubernetes application resources
+        continue-on-error: true
+        run: |
+          echo "=== Deleting k8s-main-service resources ==="
+
+          # Delete via kustomize (deployment, service, ingress, serviceaccount, etc.)
+          kubectl delete -k k8s/overlays/${{ github.event.inputs.environment }} \
+            --ignore-not-found=true \
+            --timeout=120s || true
+
+          echo "✓ Application resources deleted"
+
+      - name: Delete ExternalSecrets and SecretStore
+        continue-on-error: true
+        run: |
+          echo "=== Deleting ExternalSecrets and SecretStore ==="
+
+          namespace="ftc-app-${{ github.event.inputs.environment }}"
+
+          # Delete ExternalSecrets first (to stop secret sync)
+          kubectl delete externalsecrets --all -n "$namespace" --timeout=30s || true
+
+          # Delete SecretStore
+          kubectl delete secretstore --all -n "$namespace" --timeout=30s || true
+
+          # Delete generated secrets
+          kubectl delete secret fiap-tech-challenge-db-secrets -n "$namespace" --ignore-not-found=true || true
+          kubectl delete secret fiap-tech-challenge-auth-config -n "$namespace" --ignore-not-found=true || true
+
+          echo "✓ ExternalSecrets and SecretStore deleted"
+
+      - name: Delete application namespaces
+        continue-on-error: true
+        run: |
+          echo "=== Deleting application namespaces ==="
+
+          # Delete staging/production namespace
+          kubectl delete namespace ftc-app-${{ github.event.inputs.environment }} \
+            --ignore-not-found=true \
+            --timeout=120s || true
+
+          echo "✓ Namespaces deleted"
+
+      - name: Wait for finalizers
+        continue-on-error: true
+        run: |
+          echo "Waiting 30s for Kubernetes finalizers to complete..."
+          sleep 30
+
+  # ---------------------------------------------------------------------------
   # Step 4b: Destroy EKS Cluster (Phase 1)
   # ---------------------------------------------------------------------------
   destroy-eks-cluster:
     name: "4b. Destroy EKS Cluster (Phase 1)"
     runs-on: ubuntu-latest
-    needs: [validate, destroy-database, destroy-eks-addons]
+    needs: [validate, destroy-database, destroy-eks-addons, clean-k8s-resources]
     if: always() && needs.validate.result == 'success'
     continue-on-error: true
     steps:
@@ -527,7 +608,7 @@ jobs:
   summary:
     name: Destruction Summary
     runs-on: ubuntu-latest
-    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, destroy-eks-cluster, force-cleanup, validate-cleanup]
+    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, clean-k8s-resources, destroy-eks-cluster, force-cleanup, validate-cleanup]
     if: always()
     steps:
       - name: Generate Summary
@@ -542,6 +623,7 @@ jobs:
           echo "| Lambda Functions | ${{ needs.destroy-lambda.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Database (RDS) | ${{ needs.destroy-database.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| K8s Addons (Phase 2) | ${{ needs.destroy-eks-addons.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **K8s Resources Cleanup** | ${{ needs.clean-k8s-resources.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| EKS Cluster (Phase 1) | ${{ needs.destroy-eks-cluster.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Force Cleanup** | ${{ needs.force-cleanup.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Final Validation** | ${{ needs.validate-cleanup.result }} |" >> $GITHUB_STEP_SUMMARY

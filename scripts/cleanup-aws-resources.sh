@@ -73,6 +73,66 @@ retry() {
 # Cleanup Functions
 # =============================================================================
 
+cleanup_kubernetes_resources() {
+    print_step "Cleaning up Kubernetes resources..."
+
+    local cluster_name="${PROJECT_NAME}-eks-${ENVIRONMENT}"
+    local namespace="ftc-app-${ENVIRONMENT}"
+
+    # Check if cluster exists
+    if ! aws eks describe-cluster --name "$cluster_name" --region "$REGION" &>/dev/null; then
+        print_info "No EKS cluster found - skipping Kubernetes cleanup"
+        return 0
+    fi
+
+    # Check if kubectl is installed
+    if ! command -v kubectl &> /dev/null; then
+        print_info "kubectl not found - installing..."
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" > /dev/null 2>&1
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/ 2>/dev/null || mv kubectl ~/kubectl
+        export PATH="$HOME:$PATH"
+    fi
+
+    # Configure kubectl
+    print_info "Configuring kubectl for cluster: $cluster_name"
+    if ! aws eks update-kubeconfig --region "$REGION" --name "$cluster_name" > /dev/null 2>&1; then
+        print_info "Failed to configure kubectl - cluster may be already deleted"
+        return 0
+    fi
+
+    # Delete application deployments, services, ingress
+    print_info "Deleting application resources in namespace: $namespace"
+    kubectl delete deployment,service,ingress,serviceaccount,configmap,hpa,pdb \
+        --all -n "$namespace" --ignore-not-found=true --timeout=60s > /dev/null 2>&1 || true
+
+    # Delete ExternalSecrets and SecretStore
+    print_info "Deleting ExternalSecrets and SecretStore"
+    kubectl delete externalsecrets --all -n "$namespace" --ignore-not-found=true --timeout=30s > /dev/null 2>&1 || true
+    kubectl delete secretstore --all -n "$namespace" --ignore-not-found=true --timeout=30s > /dev/null 2>&1 || true
+
+    # Delete secrets
+    print_info "Deleting secrets"
+    kubectl delete secret fiap-tech-challenge-db-secrets -n "$namespace" --ignore-not-found=true > /dev/null 2>&1 || true
+    kubectl delete secret fiap-tech-challenge-auth-config -n "$namespace" --ignore-not-found=true > /dev/null 2>&1 || true
+
+    # Delete namespace (this will cascade delete remaining resources)
+    print_info "Deleting namespace: $namespace"
+    kubectl delete namespace "$namespace" --ignore-not-found=true --timeout=60s > /dev/null 2>&1 || true
+
+    # Also try to delete the other environment's namespace if it exists
+    local other_env="staging"
+    if [ "$ENVIRONMENT" == "staging" ]; then
+        other_env="production"
+    fi
+    kubectl delete namespace "ftc-app-${other_env}" --ignore-not-found=true --timeout=30s > /dev/null 2>&1 || true
+
+    print_info "Waiting 30s for finalizers..."
+    sleep 30
+
+    print_success "Kubernetes resources cleaned"
+}
+
 cleanup_eks_cluster() {
     print_step "Cleaning up EKS cluster..."
 
@@ -421,6 +481,7 @@ echo -e "\n${YELLOW}Starting AGGRESSIVE cleanup for: ${ENVIRONMENT}${NC}\n"
 
 cleanup_lambda
 cleanup_rds
+cleanup_kubernetes_resources
 cleanup_eks_cluster
 cleanup_kms_aliases
 cleanup_cloudwatch_logs
