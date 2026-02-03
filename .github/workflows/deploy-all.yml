@@ -215,7 +215,7 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 30; // 15 minutes max
+            const maxAttempts = 60; // 30 minutes max (increased for webhook readiness + SigNoz)
             let attempts = 0;
 
             while (attempts < maxAttempts) {
