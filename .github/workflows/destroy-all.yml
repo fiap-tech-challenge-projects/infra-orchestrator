@@ -423,7 +423,7 @@ jobs:
   force-cleanup:
     name: Force Cleanup Orphaned Resources
     runs-on: ubuntu-latest
-    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, destroy-eks-cluster]
+    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, clean-k8s-resources, destroy-eks-cluster]
     if: always()
     steps:
       - name: Checkout
