@@ -253,9 +253,23 @@ cleanup_iam_roles_and_policies() {
                 aws iam delete-instance-profile --instance-profile-name "$profile" > /dev/null 2>&1 || true
             done
 
-            # Delete the role
+            # Delete the role (retry up to 3 times with delay)
             print_info "  Deleting role: $role"
-            aws iam delete-role --role-name "$role" > /dev/null 2>&1 || true
+            local retry_count=0
+            while [ $retry_count -lt 3 ]; do
+                if aws iam delete-role --role-name "$role" > /dev/null 2>&1; then
+                    print_info "    ✓ Role deleted"
+                    break
+                else
+                    retry_count=$((retry_count + 1))
+                    if [ $retry_count -lt 3 ]; then
+                        print_info "    Retry $retry_count/3..."
+                        sleep 2
+                    else
+                        print_info "    ⚠ Failed to delete role after 3 attempts"
+                    fi
+                fi
+            done
         done
         print_success "IAM roles cleaned"
     else
