@@ -228,7 +228,7 @@ EOF
 # =============================================================================
 
 load_from_env_local() {
-    local env_file="../.env.local"
+    local env_file="./.env.local"
 
     if [[ ! -f "$env_file" ]]; then
         return 1
