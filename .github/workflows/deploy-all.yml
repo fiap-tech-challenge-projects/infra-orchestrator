@@ -437,7 +437,7 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 20; // 10 minutes max
+            const maxAttempts = 30; // 15 minutes max (k8s-main-service deployment needs ~11 minutes)
             let attempts = 0;
 
             while (attempts < maxAttempts) {
