@@ -1,5 +1,25 @@
 # FIAP Tech Challenge - Infrastructure Orchestrator
 
+> **⚠️ PHASE 3 LEGACY - CENTRALIZED ORCHESTRATION**
+>
+> This orchestrator was used for Phase 3's **monolithic deployment model**.
+>
+> **Phase 4 now uses distributed deployment:**
+> - See `/orchestration/` for convenience deployment scripts
+> - Each microservice has independent CI/CD pipeline
+> - No centralized orchestrator needed
+>
+> **This directory is kept for:**
+> - ✅ Historical reference (Phase 3 architecture)
+> - ✅ AWS Bootstrap scripts (still useful for backend setup)
+> - ✅ Understanding the evolution from monolith to microservices
+>
+> **For Phase 4 deployments, use:** `/orchestration/setup-all.sh`
+
+---
+
+## Phase 3 Documentation (Legacy)
+
 Orquestrador central para deploy de toda a infraestrutura do projeto FIAP Tech Challenge Phase 3.
 
 ## Visao Geral
