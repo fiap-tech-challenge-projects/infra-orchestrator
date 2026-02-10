@@ -17,12 +17,19 @@ NC='\033[0m'
 
 # Repositories to update
 REPOS=(
+    # Phase 3 Infrastructure
     "kubernetes-core-infra"
     "kubernetes-addons"
     "database-managed-infra"
     "lambda-api-handler"
     "k8s-main-service"
     "infra-orchestrator"
+    # Phase 4 Microservices
+    "os-service"
+    "billing-service"
+    "execution-service"
+    "saga-orchestrator-service"
+    "messaging-infra"
 )
 
 # =============================================================================
