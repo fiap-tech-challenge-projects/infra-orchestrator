@@ -7,6 +7,10 @@
 
 set -e
 
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INFRA_ORCHESTRATOR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -235,11 +239,13 @@ EOF
 # =============================================================================
 
 load_from_env_local() {
-    local env_file="./.env.local"
+    local env_file="$INFRA_ORCHESTRATOR_DIR/.env.local"
 
     if [[ ! -f "$env_file" ]]; then
         return 1
     fi
+
+    echo -e "${CYAN}Found .env.local in infra-orchestrator directory${NC}"
 
     # Source the .env.local file
     source "$env_file"
