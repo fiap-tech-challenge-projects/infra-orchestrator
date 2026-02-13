@@ -127,6 +127,8 @@ bootstrap_terraform_backend() {
             --region "$REGION" > /dev/null 2>&1
         log_info "Waiting for DynamoDB table to become active..."
         aws dynamodb wait table-exists --table-name "fiap-terraform-locks" --region "$REGION"
+        # Extra wait for DynamoDB to be fully consistent for locking operations
+        sleep 10
         log_success "DynamoDB lock table created and active"
     fi
 }
