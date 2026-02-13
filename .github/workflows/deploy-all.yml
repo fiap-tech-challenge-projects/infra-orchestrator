@@ -6,13 +6,18 @@ on:
       environment:
         description: 'Environment to deploy'
         required: true
-        default: 'staging'
+        default: 'development'
         type: choice
         options:
-          - staging
+          - development
           - production
       skip_eks:
-        description: 'Skip EKS deployment (if already exists)'
+        description: 'Skip EKS cluster deployment (if already exists)'
+        required: false
+        type: boolean
+        default: false
+      skip_addons:
+        description: 'Skip K8s Addons deployment (if already exists)'
         required: false
         type: boolean
         default: false
@@ -26,8 +31,13 @@ on:
         required: false
         type: boolean
         default: false
+      skip_messaging:
+        description: 'Skip Messaging deployment'
+        required: false
+        type: boolean
+        default: false
       skip_app:
-        description: 'Skip K8s App deployment'
+        description: 'Skip Microservices deployment'
         required: false
         type: boolean
         default: false
@@ -142,19 +152,30 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 120; // 60 minutes max (EKS takes 40-50 min)
+            const dispatchTime = new Date().toISOString();
+            const maxAttempts = 120;
             let attempts = 0;
+
+            await delay(15000); // Wait for run to be created
 
             while (attempts < maxAttempts) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'kubernetes-core-infra',
                 workflow_id: 'terraform.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
 
-              const latestRun = runs.data.workflow_runs[0];
-              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) {
+                console.log(`Waiting for run to appear (attempt ${attempts + 1})...`);
+                attempts++;
+                await delay(15000);
+                continue;
+              }
+
+              console.log(`Run #${latestRun.id} status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
 
               if (latestRun.status === 'completed') {
                 if (latestRun.conclusion === 'success') {
@@ -166,7 +187,7 @@ jobs:
               }
 
               attempts++;
-              await delay(30000); // Wait 30 seconds
+              await delay(30000);
             }
 
             throw new Error('EKS cluster deployment timed out');
@@ -190,7 +211,7 @@ jobs:
       always() &&
       needs.validate.result == 'success' &&
       (needs.deploy-eks-cluster.result == 'success' || needs.deploy-eks-cluster.result == 'skipped') &&
-      github.event.inputs.skip_eks != 'true'
+      github.event.inputs.skip_addons != 'true'
     steps:
       - name: Trigger kubernetes-addons workflow (Phase 2)
         uses: actions/github-script@v7
@@ -215,19 +236,30 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 60; // 30 minutes max (increased for webhook readiness + SigNoz)
+            const dispatchTime = new Date().toISOString();
+            const maxAttempts = 60;
             let attempts = 0;
+
+            await delay(15000);
 
             while (attempts < maxAttempts) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'kubernetes-addons',
                 workflow_id: 'terraform.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
 
-              const latestRun = runs.data.workflow_runs[0];
-              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) {
+                console.log(`Waiting for run to appear (attempt ${attempts + 1})...`);
+                attempts++;
+                await delay(15000);
+                continue;
+              }
+
+              console.log(`Run #${latestRun.id} status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
 
               if (latestRun.status === 'completed') {
                 if (latestRun.conclusion === 'success') {
@@ -239,7 +271,7 @@ jobs:
               }
 
               attempts++;
-              await delay(30000); // Wait 30 seconds
+              await delay(30000);
             }
 
             throw new Error('K8s addons deployment timed out');
@@ -289,19 +321,30 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 40; // 20 minutes max
+            const dispatchTime = new Date().toISOString();
+            const maxAttempts = 40;
             let attempts = 0;
+
+            await delay(15000);
 
             while (attempts < maxAttempts) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'database-managed-infra',
                 workflow_id: 'terraform.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
 
-              const latestRun = runs.data.workflow_runs[0];
-              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) {
+                console.log(`Waiting for run to appear (attempt ${attempts + 1})...`);
+                attempts++;
+                await delay(15000);
+                continue;
+              }
+
+              console.log(`Run #${latestRun.id} status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
 
               if (latestRun.status === 'completed') {
                 if (latestRun.conclusion === 'success') {
@@ -313,7 +356,7 @@ jobs:
               }
 
               attempts++;
-              await delay(30000); // Wait 30 seconds
+              await delay(30000);
             }
 
             throw new Error('Database deployment timed out');
@@ -326,10 +369,10 @@ jobs:
           echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------------
-  # Step 3: Deploy Lambda Functions
+  # Step 2.5: Deploy Messaging Infrastructure (SQS, EventBridge)
   # ---------------------------------------------------------------------------
-  deploy-lambda:
-    name: "3. Deploy Lambda Functions"
+  deploy-messaging:
+    name: "2.5. Deploy Messaging Infrastructure"
     runs-on: ubuntu-latest
     needs: [validate, deploy-eks-cluster, deploy-eks-addons, deploy-database]
     if: |
@@ -338,6 +381,93 @@ jobs:
       (needs.deploy-eks-cluster.result == 'success' || needs.deploy-eks-cluster.result == 'skipped') &&
       (needs.deploy-eks-addons.result == 'success' || needs.deploy-eks-addons.result == 'skipped') &&
       (needs.deploy-database.result == 'success' || needs.deploy-database.result == 'skipped') &&
+      github.event.inputs.skip_messaging != 'true'
+    steps:
+      - name: Trigger messaging-infra workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: 'messaging-infra',
+              workflow_id: 'terraform.yml',
+              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+              inputs: {
+                environment: '${{ github.event.inputs.environment }}',
+                action: 'apply'
+              }
+            });
+            console.log('Triggered messaging-infra deployment');
+
+      - name: Wait for Messaging deployment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const dispatchTime = new Date().toISOString();
+            const maxAttempts = 20;
+            let attempts = 0;
+
+            await delay(15000);
+
+            while (attempts < maxAttempts) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: 'messaging-infra',
+                workflow_id: 'terraform.yml',
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
+              });
+
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) {
+                console.log(`Waiting for run to appear (attempt ${attempts + 1})...`);
+                attempts++;
+                await delay(15000);
+                continue;
+              }
+
+              console.log(`Run #${latestRun.id} status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+
+              if (latestRun.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('Messaging infrastructure deployment completed successfully');
+                  return;
+                } else {
+                  throw new Error(`Messaging infrastructure deployment failed: ${latestRun.conclusion}`);
+                }
+              }
+
+              attempts++;
+              await delay(30000);
+            }
+
+            throw new Error('Messaging infrastructure deployment timed out');
+
+      - name: Summary
+        run: |
+          echo "## Messaging Infrastructure Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Components:** SQS Queues, EventBridge" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Step 3: Deploy Lambda Functions
+  # ---------------------------------------------------------------------------
+  deploy-lambda:
+    name: "3. Deploy Lambda Functions"
+    runs-on: ubuntu-latest
+    needs: [validate, deploy-eks-cluster, deploy-eks-addons, deploy-database, deploy-messaging]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.deploy-eks-cluster.result == 'success' || needs.deploy-eks-cluster.result == 'skipped') &&
+      (needs.deploy-eks-addons.result == 'success' || needs.deploy-eks-addons.result == 'skipped') &&
+      (needs.deploy-database.result == 'success' || needs.deploy-database.result == 'skipped') &&
+      (needs.deploy-messaging.result == 'success' || needs.deploy-messaging.result == 'skipped') &&
       github.event.inputs.skip_lambda != 'true'
     steps:
       - name: Trigger lambda-api-handler workflow
@@ -363,19 +493,30 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 20; // 10 minutes max
+            const dispatchTime = new Date().toISOString();
+            const maxAttempts = 20;
             let attempts = 0;
+
+            await delay(15000);
 
             while (attempts < maxAttempts) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'lambda-api-handler',
                 workflow_id: 'deploy.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
 
-              const latestRun = runs.data.workflow_runs[0];
-              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) {
+                console.log(`Waiting for run to appear (attempt ${attempts + 1})...`);
+                attempts++;
+                await delay(15000);
+                continue;
+              }
+
+              console.log(`Run #${latestRun.id} status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
 
               if (latestRun.status === 'completed') {
                 if (latestRun.conclusion === 'success') {
@@ -387,7 +528,7 @@ jobs:
               }
 
               attempts++;
-              await delay(30000); // Wait 30 seconds
+              await delay(30000);
             }
 
             throw new Error('Lambda deployment timed out');
@@ -400,78 +541,209 @@ jobs:
           echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------------
-  # Step 4: Deploy Kubernetes Application
+  # Step 4: Deploy Phase 4 Microservices (os-service, billing-service, execution-service)
   # ---------------------------------------------------------------------------
-  deploy-app:
-    name: "4. Deploy K8s Application"
+  deploy-microservices:
+    name: "4. Deploy Phase 4 Microservices"
     runs-on: ubuntu-latest
-    needs: [validate, deploy-eks-cluster, deploy-eks-addons, deploy-database, deploy-lambda]
+    needs: [validate, deploy-eks-cluster, deploy-eks-addons, deploy-database, deploy-messaging, deploy-lambda]
     if: |
       always() &&
       needs.validate.result == 'success' &&
       (needs.deploy-eks-cluster.result == 'success' || needs.deploy-eks-cluster.result == 'skipped') &&
       (needs.deploy-eks-addons.result == 'success' || needs.deploy-eks-addons.result == 'skipped') &&
       (needs.deploy-database.result == 'success' || needs.deploy-database.result == 'skipped') &&
+      (needs.deploy-messaging.result == 'success' || needs.deploy-messaging.result == 'skipped') &&
       (needs.deploy-lambda.result == 'success' || needs.deploy-lambda.result == 'skipped') &&
       github.event.inputs.skip_app != 'true'
+    env:
+      NAMESPACE: ftc-app-${{ github.event.inputs.environment }}
     steps:
-      - name: Trigger k8s-main-service workflow
-        uses: actions/github-script@v7
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          github-token: ${{ secrets.GH_PAT }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: 'k8s-main-service',
-              workflow_id: 'deploy.yml',
-              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
-              inputs: {
-                environment: '${{ github.event.inputs.environment }}'
-              }
-            });
-            console.log('Triggered k8s-main-service deployment');
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Wait for App deployment
-        uses: actions/github-script@v7
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }}
+
+      - name: Create ECR Repositories
+        run: |
+          for repo in os-service billing-service execution-service; do
+            if ! aws ecr describe-repositories --repository-names "$repo" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+              aws ecr create-repository \
+                --repository-name "$repo" \
+                --image-scanning-configuration scanOnPush=true \
+                --encryption-configuration encryptionType=AES256 \
+                --region ${{ env.AWS_REGION }}
+              echo "Created ECR repo: $repo"
+            else
+              echo "ECR repo exists: $repo"
+            fi
+          done
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Checkout os-service
+        uses: actions/checkout@v4
         with:
-          github-token: ${{ secrets.GH_PAT }}
-          script: |
-            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const maxAttempts = 30; // 15 minutes max (k8s-main-service deployment needs ~11 minutes)
-            let attempts = 0;
+          repository: ${{ github.repository_owner }}/os-service
+          ref: ${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}
+          token: ${{ secrets.GH_PAT }}
+          path: os-service
 
-            while (attempts < maxAttempts) {
-              const runs = await github.rest.actions.listWorkflowRuns({
-                owner: context.repo.owner,
-                repo: 'k8s-main-service',
-                workflow_id: 'deploy.yml',
-                per_page: 1
-              });
+      - name: Checkout billing-service
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/billing-service
+          ref: ${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}
+          token: ${{ secrets.GH_PAT }}
+          path: billing-service
 
-              const latestRun = runs.data.workflow_runs[0];
-              console.log(`Run status: ${latestRun.status}, conclusion: ${latestRun.conclusion}`);
+      - name: Checkout execution-service
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/execution-service
+          ref: ${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}
+          token: ${{ secrets.GH_PAT }}
+          path: execution-service
 
-              if (latestRun.status === 'completed') {
-                if (latestRun.conclusion === 'success') {
-                  console.log('App deployment completed successfully');
-                  return;
-                } else {
-                  throw new Error(`App deployment failed: ${latestRun.conclusion}`);
-                }
-              }
+      - name: Build and Push Docker Images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ENV_TAG: ${{ github.event.inputs.environment == 'production' && 'prod' || 'dev' }}
+        run: |
+          for service in os-service billing-service execution-service; do
+            echo "=== Building $service ==="
+            cd $GITHUB_WORKSPACE/$service
 
-              attempts++;
-              await delay(30000); // Wait 30 seconds
+            IMAGE_TAG="${ENV_TAG}-$(git rev-parse --short HEAD)"
+
+            docker build --platform linux/amd64 \
+              -t $ECR_REGISTRY/$service:$IMAGE_TAG \
+              -t $ECR_REGISTRY/$service:${ENV_TAG}-latest \
+              -t $ECR_REGISTRY/$service:latest \
+              .
+
+            docker push $ECR_REGISTRY/$service:$IMAGE_TAG
+            docker push $ECR_REGISTRY/$service:${ENV_TAG}-latest
+            docker push $ECR_REGISTRY/$service:latest
+
+            echo "Pushed $service:$IMAGE_TAG"
+          done
+
+      - name: Create os-service-secrets from AWS Secrets Manager
+        continue-on-error: true
+        run: |
+          SECRET_NAME="fiap-tech-challenge/${{ github.event.inputs.environment }}/database/credentials"
+          SECRET_VALUE=$(aws secretsmanager get-secret-value \
+            --secret-id "$SECRET_NAME" \
+            --region ${{ env.AWS_REGION }} \
+            --query SecretString \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$SECRET_VALUE" ]; then
+            DB_URL=$(echo "$SECRET_VALUE" | jq -r '.DATABASE_URL // empty')
+            if [ -z "$DB_URL" ]; then
+              HOST=$(echo "$SECRET_VALUE" | jq -r '.host // empty')
+              PORT=$(echo "$SECRET_VALUE" | jq -r '.port // "5432"')
+              DBNAME=$(echo "$SECRET_VALUE" | jq -r '.dbname // empty')
+              USER=$(echo "$SECRET_VALUE" | jq -r '.username // empty')
+              PASS=$(echo "$SECRET_VALUE" | jq -r '.password // empty')
+              DB_URL="postgresql://${USER}:${PASS}@${HOST}:${PORT}/${DBNAME}?schema=public"
+            fi
+            kubectl create secret generic os-service-secrets -n ${{ env.NAMESPACE }} \
+              --from-literal=DATABASE_URL="$DB_URL" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            echo "os-service-secrets created"
+          else
+            echo "::warning::Could not fetch database credentials from Secrets Manager"
+          fi
+
+      - name: Update AWS Credentials in Kubernetes
+        run: |
+          for service in os-service billing-service execution-service; do
+            kubectl create secret generic ${service}-aws-creds -n ${{ env.NAMESPACE }} \
+              --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
+              --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
+              --from-literal=AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }} \
+              --from-literal=AWS_REGION=${{ env.AWS_REGION }} \
+              --dry-run=client -o yaml | kubectl apply -f -
+          done
+
+      - name: Run Database Migrations (os-service)
+        continue-on-error: true
+        run: |
+          cd $GITHUB_WORKSPACE/os-service
+          if [ -f k8s/migration-job.yaml ]; then
+            kubectl delete job os-service-migration -n ${{ env.NAMESPACE }} --ignore-not-found=true
+            kubectl apply -f k8s/migration-job.yaml -n ${{ env.NAMESPACE }}
+            kubectl wait --for=condition=complete --timeout=300s job/os-service-migration -n ${{ env.NAMESPACE }} || {
+              echo "Migration job logs:"
+              kubectl logs -n ${{ env.NAMESPACE }} job/os-service-migration --tail=20
             }
+          fi
 
-            throw new Error('App deployment timed out');
+      - name: Deploy Microservices to EKS
+        run: |
+          OVERLAY="${{ github.event.inputs.environment }}"
+
+          echo "=== Deploying os-service ==="
+          cd $GITHUB_WORKSPACE/os-service
+          kubectl apply -k k8s/overlays/$OVERLAY
+
+          echo "=== Deploying billing-service ==="
+          cd $GITHUB_WORKSPACE/billing-service
+          kubectl apply -k k8s/overlays/$OVERLAY
+
+          echo "=== Deploying execution-service ==="
+          cd $GITHUB_WORKSPACE/execution-service
+          kubectl apply -k k8s/overlays/$OVERLAY || echo "execution-service deploy skipped (may need MongoDB)"
+
+      - name: Wait for Deployments
+        run: |
+          # billing-service and execution-service development overlays use namePrefix: dev-
+          if [ "${{ github.event.inputs.environment }}" == "development" ]; then
+            PREFIX="dev-"
+          else
+            PREFIX=""
+          fi
+
+          echo "Waiting for os-service..."
+          kubectl rollout status deployment/os-service -n ${{ env.NAMESPACE }} --timeout=5m || true
+
+          echo "Waiting for ${PREFIX}billing-service..."
+          kubectl rollout status deployment/${PREFIX}billing-service -n ${{ env.NAMESPACE }} --timeout=5m || true
+
+          echo "Waiting for ${PREFIX}execution-service..."
+          kubectl rollout status deployment/${PREFIX}execution-service -n ${{ env.NAMESPACE }} --timeout=5m || true
+
+      - name: Verify Deployment
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Ingress ==="
+          kubectl get ingress -n ${{ env.NAMESPACE }}
 
       - name: Summary
         run: |
-          echo "## K8s Application Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "## Phase 4 Microservices Deployed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Status:** Success" >> $GITHUB_STEP_SUMMARY
           echo "- **Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Services:** os-service, billing-service, execution-service" >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------------
   # Final Summary
@@ -479,12 +751,12 @@ jobs:
   summary:
     name: Deployment Summary
     runs-on: ubuntu-latest
-    needs: [validate, deploy-eks-cluster, deploy-eks-addons, deploy-database, deploy-lambda, deploy-app]
+    needs: [validate, deploy-eks-cluster, deploy-eks-addons, deploy-database, deploy-messaging, deploy-lambda, deploy-microservices]
     if: always()
     steps:
       - name: Generate Summary
         run: |
-          echo "# Full Infrastructure Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# Full Infrastructure Deployment Summary (Phase 4)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Environment: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -494,11 +766,13 @@ jobs:
           echo "| EKS Cluster (Phase 1) | ${{ needs.deploy-eks-cluster.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| K8s Addons (Phase 2) | ${{ needs.deploy-eks-addons.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Database (RDS) | ${{ needs.deploy-database.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Messaging (SQS/EventBridge) | ${{ needs.deploy-messaging.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Lambda Functions | ${{ needs.deploy-lambda.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| K8s Application | ${{ needs.deploy-app.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Microservices (OS, Billing, Execution) | ${{ needs.deploy-microservices.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "1. Configure kubectl: \`aws eks update-kubeconfig --region us-east-1 --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
           echo "2. Check pods: \`kubectl get pods -n ftc-app-${{ github.event.inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "3. Get API Gateway URL from Lambda deployment output" >> $GITHUB_STEP_SUMMARY
+          echo "3. Get ALB URL: \`kubectl get ingress -n ftc-app-${{ github.event.inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. Get API Gateway URL from Lambda deployment output" >> $GITHUB_STEP_SUMMARY
