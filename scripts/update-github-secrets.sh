@@ -32,7 +32,6 @@ REPOS=(
     "os-service"
     "billing-service"
     "execution-service"
-    "saga-orchestrator-service"
     "messaging-infra"
 )
 
