@@ -1,187 +1,161 @@
 # FIAP Tech Challenge - Infrastructure Orchestrator
 
-Orquestrador central para deploy de toda a infraestrutura do projeto FIAP Tech Challenge Phase 3.
+Central orchestration hub for deploying all FIAP Tech Challenge Phase 4 infrastructure. Supports two deployment paths: **local scripts** (for development) and **GitHub Actions workflows** (for CI/CD).
 
-## Visao Geral
+## Quick Start
 
-Este repositorio contem workflows que orquestram o deploy de todos os componentes na ordem correta:
-
-```
-1. kubernetes-core-infra  →  VPC, EKS Cluster, SigNoz
-2. database-managed-infra →  RDS PostgreSQL, Secrets Manager
-3. lambda-api-handler     →  Lambda Auth, API Gateway
-4. k8s-main-service       →  Aplicacao principal no EKS
-```
-
-## Pre-requisitos
-
-### 1. Secrets no GitHub
-
-Configure os seguintes secrets em **todos os repositorios** (incluindo este):
-
-| Secret | Descricao |
-|--------|-----------|
-| `AWS_ACCESS_KEY_ID` | Access Key da AWS |
-| `AWS_SECRET_ACCESS_KEY` | Secret Key da AWS |
-| `AWS_SESSION_TOKEN` | Session Token da AWS (obrigatorio para AWS Academy) |
-| `GH_PAT` | Personal Access Token do GitHub com permissao `repo` e `workflow` |
-
-> **Nota AWS Academy**: O `AWS_SESSION_TOKEN` expira a cada 4 horas. Atualize manualmente antes de cada deploy.
-
-### 2. Personal Access Token (GH_PAT)
-
-O token precisa das seguintes permissoes:
-- `repo` (Full control of private repositories)
-- `workflow` (Update GitHub Action workflows)
-
-Para criar:
-1. GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
-2. Generate new token (classic)
-3. Selecione `repo` e `workflow`
-4. Copie o token e adicione como secret `GH_PAT` em todos os repos
-
-### 3. Armazenamento Local de Secrets
-
-Para facilitar o gerenciamento, os secrets podem ser armazenados localmente:
-
-**Arquivo:** `.env.local` (ja esta no .gitignore)
-```bash
-# Token GH_PAT armazenado localmente (nao comitado)
-GH_PAT=ghp_xxxxxxxxxxxxxxxxxxxxx
-```
-
-**Scripts Uteis:**
+### Local Deployment (from your machine)
 
 ```bash
-# Atualizar secrets AWS em todos os 6 repos
+# Deploy everything
+./scripts/deploy-all.sh --env=development
+
+# Deploy only services (infra already exists)
+./scripts/deploy-services.sh --env=development
+
+# Destroy everything
+./scripts/destroy-all.sh --env=development --force
+```
+
+### GitHub Actions Deployment
+
+1. Go to **Actions** > **Bootstrap AWS Infrastructure** > Run workflow (`create`)
+2. Go to **Actions** > **Deploy All Infrastructure** > Select environment > Run workflow
+3. To tear down: **Actions** > **Destroy All Infrastructure** > Select environment > Type `DESTROY`
+
+## Deployment Order
+
+Infrastructure must be deployed in this order (dependencies):
+
+```
+1a. kubernetes-core-infra  ->  VPC, EKS Cluster (Phase 1)
+1b. kubernetes-addons      ->  Namespaces, Helm releases (Phase 2)
+2.  database-managed-infra ->  RDS PostgreSQL, DynamoDB, DocumentDB
+2.5 messaging-infra        ->  EventBridge, SQS queues
+3.  lambda-api-handler     ->  Lambda Auth, API Gateway
+4.  Microservices          ->  ECR repos, Docker images, DB migrations,
+                               os-service, billing-service, execution-service
+```
+
+## Scripts Reference
+
+### Deployment Scripts
+
+| Script | Description |
+|--------|-------------|
+| `deploy-all.sh` | Full deployment: infra + ECR + Docker + migrations + services |
+| `deploy-services.sh` | Deploy/update microservices only (assumes infra exists) |
+| `build-and-push.sh` | Build Docker images and push to ECR |
+| `create-ecr-repos.sh` | Create ECR repositories for all microservices |
+
+### Cleanup Scripts
+
+| Script | Description |
+|--------|-------------|
+| `destroy-all.sh` | Full teardown: services + Terraform + AWS CLI cleanup |
+| `cleanup-aws-resources.sh` | Aggressive AWS resource cleanup (catches orphans) |
+
+### Credential Management
+
+| Script | Description |
+|--------|-------------|
+| `update-k8s-credentials.sh` | Sync AWS credentials to K8s secrets (for EventBridge/SQS) |
+| `update-github-secrets.sh` | Bulk update AWS secrets across all 11 GitHub repos |
+| `update-gh-pat.sh` | Update GH_PAT secret across repos |
+| `delete-session-token.sh` | Remove AWS_SESSION_TOKEN from GitHub repos |
+
+### Testing Scripts
+
+| Script | Description |
+|--------|-------------|
+| `test-e2e.sh` | Full E2E flow: Order -> Budget -> Payment -> Execution |
+| `test-saga-rollback.sh` | Saga compensation: Budget rejection prevents execution |
+
+## Workflows Reference
+
+### bootstrap.yml
+
+Creates/destroys Terraform backend resources (S3 bucket + DynamoDB lock table).
+
+**Usage**: Actions > Bootstrap AWS Infrastructure > `create` or `destroy`
+
+### deploy-all.yml
+
+Orchestrated deployment of all infrastructure in correct order with skip options:
+- `skip_eks`, `skip_database`, `skip_messaging`, `skip_lambda`, `skip_app`
+
+Includes Phase 4 microservices: ECR repos, Docker builds, DB migrations, K8s deployments.
+
+**Usage**: Actions > Deploy All Infrastructure > Select environment (development/production)
+
+### destroy-all.yml
+
+Destroys all infrastructure in reverse order. Requires typing `DESTROY` to confirm.
+
+**Usage**: Actions > Destroy All Infrastructure > Select environment > Type `DESTROY`
+
+## Environment Strategy
+
+| Branch | Environment | Terraform Workspace |
+|--------|-------------|-------------------|
+| `develop` | development | development |
+| `main` | production | production |
+
+All infra repos accept `development` and `production` via `workflow_dispatch`.
+
+## Required GitHub Secrets
+
+| Secret | Description | Required In |
+|--------|-------------|-------------|
+| `AWS_ACCESS_KEY_ID` | AWS access key | All repos |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key | All repos |
+| `AWS_SESSION_TOKEN` | AWS session (Academy) | All repos |
+| `GH_PAT` | GitHub PAT with `repo` + `workflow` | infra-orchestrator |
+
+### Bulk Update Secrets
+
+```bash
 ./scripts/update-github-secrets.sh
-
-# Atualizar apenas GH_PAT em todos os repos (le de .env.local)
-./scripts/update-gh-pat.sh
 ```
 
-O script `update-gh-pat.sh`:
-- Le o token de `.env.local`
-- Atualiza em todos os 6 repositorios automaticamente
-- Evita expor o token no terminal
+Supports pasting AWS Academy credential blocks. Auto-detects GitHub username. Updates all 11 repos.
 
-## Workflows Disponiveis
+## AWS Academy Notes
 
-### 1. Bootstrap (`bootstrap.yml`)
+- `AWS_SESSION_TOKEN` expires every 4 hours
+- Uses `LabRole` (cannot create custom IAM roles)
+- Single NAT Gateway for cost optimization
+- Re-run `./scripts/update-k8s-credentials.sh` after token refresh
 
-Cria os recursos base necessarios para o Terraform:
-- S3 Bucket para Terraform state
-- DynamoDB Table para locking
+## Estimated Costs
 
-**Uso:**
-1. Va em Actions → Bootstrap AWS Infrastructure
-2. Selecione `create`
-3. Run workflow
+| Resource | Monthly Cost |
+|----------|-------------|
+| EKS Cluster | ~$73 |
+| EC2 (2x t3.medium) | ~$60 |
+| RDS (db.t3.micro) | ~$15 |
+| NAT Gateway | ~$32 |
+| Lambda | ~$0 (free tier) |
+| **Total** | **~$180/month** |
 
-### 2. Deploy All (`deploy-all.yml`)
-
-Deploya toda a infraestrutura na ordem correta:
-
-```
-validate → deploy-eks → deploy-database → deploy-lambda → deploy-app
-```
-
-**Uso:**
-1. Va em Actions → Deploy All Infrastructure
-2. Selecione o environment (staging/production)
-3. Opcionalmente, pule componentes ja existentes
-4. Run workflow
-
-**Opcoes:**
-- `skip_eks`: Pula deploy do EKS (se ja existe)
-- `skip_database`: Pula deploy do RDS (se ja existe)
-- `skip_lambda`: Pula deploy das Lambdas
-- `skip_app`: Pula deploy da aplicacao K8s
-
-### 3. Destroy All (`destroy-all.yml`)
-
-Destroi toda a infraestrutura (ordem reversa):
-
-```
-destroy-app → destroy-lambda → destroy-database → destroy-eks
-```
-
-**Uso:**
-1. Va em Actions → Destroy All Infrastructure
-2. Selecione o environment
-3. Digite `DESTROY` para confirmar
-4. Run workflow
-
-## Fluxo de Deploy Completo
-
-```bash
-# Primeira vez (ambiente novo)
-1. Rodar Bootstrap (create)
-2. Rodar Deploy All (staging)
-
-# Atualizacoes subsequentes
-# Push nas branches dos repos individuais dispara deploys automaticos
-
-# Destruir ambiente
-1. Rodar Destroy All (staging)
-2. Rodar Bootstrap (destroy) - opcional, remove bucket S3
-```
-
-## Ambientes
-
-| Branch | Environment | Trigger |
-|--------|-------------|---------|
-| `develop` | staging | Push automatico |
-| `main` | production | Push automatico |
-
-## Estrutura dos Repositorios
-
-```
-fiap/
-├── infra-orchestrator/      ← Este repo (orquestrador)
-├── kubernetes-core-infra/   ← VPC, EKS, SigNoz
-├── database-managed-infra/  ← RDS PostgreSQL
-├── lambda-api-handler/      ← Lambda Auth Functions
-├── k8s-main-service/        ← Aplicacao NestJS
-└── fiap-tech-challenge/     ← Codigo legado (fases 1-2)
-```
+Use `destroy-all.sh` or `Destroy All` workflow when not in use.
 
 ## Troubleshooting
 
-### Erro: "Resource not found"
+### Bad credentials / Resource not accessible
 
-Os workflows dependem uns dos outros. Se um falhar, verifique:
-1. O workflow anterior completou com sucesso?
-2. Os recursos foram criados corretamente?
+The `GH_PAT` may be expired or missing permissions. Regenerate with `repo` + `workflow` scopes.
 
-### Erro: "Bad credentials" ou "Resource not accessible"
+### Timeout on EKS/RDS
 
-O `GH_PAT` pode estar:
-- Expirado
-- Sem permissoes suficientes
-- Nao configurado em todos os repos
+EKS takes ~15-20 min, RDS ~10-15 min. This is normal.
 
-### Timeout
+### Session token expired
 
-Alguns recursos demoram para criar:
-- EKS Cluster: ~15-20 minutos
-- RDS: ~10-15 minutos
+```bash
+# Update local K8s secrets
+./scripts/update-k8s-credentials.sh
 
-Os workflows tem timeouts adequados, mas podem precisar de ajuste.
-
-## Custos AWS
-
-Estimativa mensal (ambiente staging):
-
-| Recurso | Custo Estimado |
-|---------|---------------|
-| EKS Cluster | ~$73/mes |
-| EC2 (2x t3.medium) | ~$60/mes |
-| RDS (db.t3.micro) | ~$15/mes |
-| NAT Gateway | ~$32/mes |
-| Lambda | ~$0 (free tier) |
-| **Total** | **~$180/mes** |
-
-Para reduzir custos:
-- Use `Destroy All` quando nao estiver usando
-- AWS Academy: creditos disponiveis
+# Update GitHub secrets for CI/CD
+./scripts/update-github-secrets.sh
+```

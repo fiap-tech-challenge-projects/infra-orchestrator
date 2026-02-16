@@ -8,7 +8,7 @@ on:
         required: true
         type: choice
         options:
-          - staging
+          - development
           - production
       confirm:
         description: 'Type "DESTROY" to confirm'
@@ -52,6 +52,8 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # AWS_SESSION_TOKEN is optional (only required for AWS Academy)
+          # If not set, it will be empty and the action will ignore it
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
@@ -82,33 +84,91 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Step 1: Destroy K8s Application (reverse order)
+  # Step 1: Destroy Phase 4 Microservices (reverse order)
   # ---------------------------------------------------------------------------
-  destroy-app:
-    name: "1. Destroy K8s Application"
+  destroy-microservices:
+    name: "1. Destroy Phase 4 Microservices"
     runs-on: ubuntu-latest
     needs: [validate, clean-locks]
     continue-on-error: true
     steps:
-      - name: Trigger k8s-main-service destroy
-        uses: actions/github-script@v7
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          github-token: ${{ secrets.GH_PAT }}
-          script: |
-            try {
-              await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: 'k8s-main-service',
-                workflow_id: 'deploy.yml',
-                ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
-                inputs: {
-                  environment: '${{ github.event.inputs.environment }}',
-                  action: 'destroy'
-                }
-              });
-            } catch (error) {
-              console.log('Could not trigger k8s-main-service destroy:', error.message);
-            }
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        continue-on-error: true
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }} || \
+          echo "EKS cluster not reachable - will skip kubectl cleanup"
+
+      - name: Checkout os-service
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository_owner }}/os-service
+          ref: ${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}
+          token: ${{ secrets.GH_PAT }}
+          path: os-service
+
+      - name: Checkout billing-service
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository_owner }}/billing-service
+          ref: ${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}
+          token: ${{ secrets.GH_PAT }}
+          path: billing-service
+
+      - name: Checkout execution-service
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository_owner }}/execution-service
+          ref: ${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}
+          token: ${{ secrets.GH_PAT }}
+          path: execution-service
+
+      - name: Delete Microservice K8s Resources
+        continue-on-error: true
+        run: |
+          OVERLAY="${{ github.event.inputs.environment }}"
+          NAMESPACE="ftc-app-${OVERLAY}"
+
+          for service in execution-service billing-service os-service; do
+            echo "=== Deleting $service ==="
+            if [ -d "$service/k8s/overlays/$OVERLAY" ]; then
+              kubectl delete -k $service/k8s/overlays/$OVERLAY \
+                --ignore-not-found=true --timeout=120s || true
+            fi
+          done
+
+          # Delete migration jobs
+          kubectl delete job os-service-migration -n $NAMESPACE --ignore-not-found=true || true
+
+          # Delete AWS credential secrets
+          for service in os-service billing-service execution-service; do
+            kubectl delete secret ${service}-aws-creds -n $NAMESPACE --ignore-not-found=true || true
+            kubectl delete secret dev-${service}-aws-creds -n $NAMESPACE --ignore-not-found=true || true
+          done
+
+          echo "Microservice resources deleted"
+
+      - name: Delete ECR Repositories
+        continue-on-error: true
+        run: |
+          for repo in os-service billing-service execution-service; do
+            if aws ecr describe-repositories --repository-names "$repo" --region ${{ env.AWS_REGION }} 2>/dev/null; then
+              aws ecr delete-repository --repository-name "$repo" --force --region ${{ env.AWS_REGION }}
+              echo "Deleted ECR repo: $repo"
+            fi
+          done
 
   # ---------------------------------------------------------------------------
   # Step 2: Destroy Lambda Functions
@@ -116,7 +176,7 @@ jobs:
   destroy-lambda:
     name: "2. Destroy Lambda Functions"
     runs-on: ubuntu-latest
-    needs: [validate, destroy-app]
+    needs: [validate, destroy-microservices]
     if: always() && needs.validate.result == 'success'
     continue-on-error: true
     steps:
@@ -125,16 +185,20 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PAT }}
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: 'lambda-api-handler',
-              workflow_id: 'deploy.yml',
-              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
-              inputs: {
-                environment: '${{ github.event.inputs.environment }}',
-                action: 'destroy'
-              }
-            });
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: 'lambda-api-handler',
+                workflow_id: 'deploy.yml',
+                ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+                inputs: {
+                  environment: '${{ github.event.inputs.environment }}',
+                  action: 'destroy'
+                }
+              });
+            } catch (error) {
+              console.log('Could not trigger lambda-api-handler destroy:', error.message);
+            }
 
       - name: Wait for Lambda destruction
         continue-on-error: true
@@ -143,28 +207,95 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const dispatchTime = new Date().toISOString();
             let attempts = 0;
+            await delay(15000);
             while (attempts < 20) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'lambda-api-handler',
                 workflow_id: 'deploy.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
-              const latestRun = runs.data.workflow_runs[0];
-              if (latestRun?.status === 'completed') {
-                if (latestRun.conclusion === 'success') {
-                  console.log('✓ Lambda destruction completed successfully');
-                  return;
-                } else {
-                  console.log(`⚠ Lambda destruction failed: ${latestRun.conclusion}`);
-                  return; // Don't throw, just log and continue
-                }
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) { attempts++; await delay(15000); continue; }
+              if (latestRun.status === 'completed') {
+                console.log(latestRun.conclusion === 'success'
+                  ? 'Lambda destruction completed successfully'
+                  : `Lambda destruction failed: ${latestRun.conclusion}`);
+                return;
               }
               attempts++;
               await delay(30000);
             }
-            console.log('⚠ Lambda destruction timed out');
+            console.log('Lambda destruction timed out');
+
+  # ---------------------------------------------------------------------------
+  # Step 2.5: Destroy Messaging Infrastructure
+  # ---------------------------------------------------------------------------
+  destroy-messaging:
+    name: "2.5. Destroy Messaging Infrastructure"
+    runs-on: ubuntu-latest
+    needs: [validate, destroy-lambda]
+    if: always() && needs.validate.result == 'success'
+    continue-on-error: true
+    steps:
+      - name: Trigger messaging-infra destroy
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: 'messaging-infra',
+                workflow_id: 'terraform.yml',
+                ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+                inputs: {
+                  environment: '${{ github.event.inputs.environment }}',
+                  action: 'destroy'
+                }
+              });
+            } catch (error) {
+              console.log('Could not trigger messaging-infra destroy:', error.message);
+            }
+
+      - name: Wait for Messaging destruction
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const dispatchTime = new Date().toISOString();
+            let attempts = 0;
+            await delay(15000);
+            while (attempts < 20) {
+              try {
+                const runs = await github.rest.actions.listWorkflowRuns({
+                  owner: context.repo.owner,
+                  repo: 'messaging-infra',
+                  workflow_id: 'terraform.yml',
+                  created: `>=${dispatchTime.split('T')[0]}`,
+                  per_page: 5
+                });
+                const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+                if (!latestRun) { attempts++; await delay(15000); continue; }
+                if (latestRun.status === 'completed') {
+                  console.log(latestRun.conclusion === 'success'
+                    ? 'Messaging destruction completed successfully'
+                    : `Messaging destruction failed: ${latestRun.conclusion}`);
+                  return;
+                }
+              } catch (error) {
+                console.log('Could not check messaging-infra status:', error.message);
+                return;
+              }
+              attempts++;
+              await delay(30000);
+            }
+            console.log('Messaging destruction timed out');
 
   # ---------------------------------------------------------------------------
   # Step 3: Destroy Database
@@ -172,7 +303,7 @@ jobs:
   destroy-database:
     name: "3. Destroy Database"
     runs-on: ubuntu-latest
-    needs: [validate, destroy-lambda]
+    needs: [validate, destroy-messaging]
     if: always() && needs.validate.result == 'success'
     continue-on-error: true
     steps:
@@ -181,16 +312,20 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PAT }}
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: 'database-managed-infra',
-              workflow_id: 'terraform.yml',
-              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
-              inputs: {
-                environment: '${{ github.event.inputs.environment }}',
-                action: 'destroy'
-              }
-            });
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: 'database-managed-infra',
+                workflow_id: 'terraform.yml',
+                ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+                inputs: {
+                  environment: '${{ github.event.inputs.environment }}',
+                  action: 'destroy'
+                }
+              });
+            } catch (error) {
+              console.log('Could not trigger database-managed-infra destroy:', error.message);
+            }
 
       - name: Wait for Database destruction
         continue-on-error: true
@@ -199,28 +334,29 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const dispatchTime = new Date().toISOString();
             let attempts = 0;
+            await delay(15000);
             while (attempts < 30) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'database-managed-infra',
                 workflow_id: 'terraform.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
-              const latestRun = runs.data.workflow_runs[0];
-              if (latestRun?.status === 'completed') {
-                if (latestRun.conclusion === 'success') {
-                  console.log('✓ Database destruction completed successfully');
-                  return;
-                } else {
-                  console.log(`⚠ Database destruction failed: ${latestRun.conclusion}`);
-                  return; // Don't throw, just log and continue
-                }
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) { attempts++; await delay(15000); continue; }
+              if (latestRun.status === 'completed') {
+                console.log(latestRun.conclusion === 'success'
+                  ? 'Database destruction completed successfully'
+                  : `Database destruction failed: ${latestRun.conclusion}`);
+                return;
               }
               attempts++;
               await delay(30000);
             }
-            console.log('⚠ Database destruction timed out');
+            console.log('Database destruction timed out');
 
   # ---------------------------------------------------------------------------
   # Step 4a: Destroy K8s Addons (Phase 2)
@@ -237,16 +373,20 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PAT }}
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: 'kubernetes-addons',
-              workflow_id: 'terraform.yml',
-              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
-              inputs: {
-                environment: '${{ github.event.inputs.environment }}',
-                action: 'destroy'
-              }
-            });
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: 'kubernetes-addons',
+                workflow_id: 'terraform.yml',
+                ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+                inputs: {
+                  environment: '${{ github.event.inputs.environment }}',
+                  action: 'destroy'
+                }
+              });
+            } catch (error) {
+              console.log('Could not trigger kubernetes-addons destroy:', error.message);
+            }
 
       - name: Wait for K8s addons destruction
         continue-on-error: true
@@ -255,28 +395,102 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const dispatchTime = new Date().toISOString();
             let attempts = 0;
+            await delay(15000);
             while (attempts < 20) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'kubernetes-addons',
                 workflow_id: 'terraform.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
-              const latestRun = runs.data.workflow_runs[0];
-              if (latestRun?.status === 'completed') {
-                if (latestRun.conclusion === 'success') {
-                  console.log('✓ K8s addons destruction completed successfully');
-                  return;
-                } else {
-                  console.log(`⚠ K8s addons destruction failed: ${latestRun.conclusion}`);
-                  return; // Don't throw, just log and continue
-                }
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) { attempts++; await delay(15000); continue; }
+              if (latestRun.status === 'completed') {
+                console.log(latestRun.conclusion === 'success'
+                  ? 'K8s addons destruction completed successfully'
+                  : `K8s addons destruction failed: ${latestRun.conclusion}`);
+                return;
               }
               attempts++;
               await delay(30000);
             }
-            console.log('⚠ K8s addons destruction timed out');
+            console.log('K8s addons destruction timed out');
+
+  # ---------------------------------------------------------------------------
+  # Step 4a.5: Clean Kubernetes Resources (before cluster destruction)
+  # ---------------------------------------------------------------------------
+  clean-k8s-resources:
+    name: "4a.5. Clean Kubernetes Resources"
+    runs-on: ubuntu-latest
+    needs: [validate, destroy-eks-addons]
+    if: always() && needs.validate.result == 'success'
+    continue-on-error: true
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        continue-on-error: true
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }}
+
+      - name: Delete ExternalSecrets and SecretStore
+        continue-on-error: true
+        run: |
+          echo "=== Deleting ExternalSecrets and SecretStore ==="
+
+          for namespace in ftc-app-${{ github.event.inputs.environment }}; do
+            kubectl delete externalsecrets --all -n "$namespace" --timeout=30s 2>/dev/null || true
+            kubectl delete secretstore --all -n "$namespace" --timeout=30s 2>/dev/null || true
+            kubectl delete secret fiap-tech-challenge-db-secrets -n "$namespace" --ignore-not-found=true 2>/dev/null || true
+            kubectl delete secret fiap-tech-challenge-auth-config -n "$namespace" --ignore-not-found=true 2>/dev/null || true
+          done
+
+          echo "ExternalSecrets and SecretStore deleted"
+
+      - name: Delete all remaining resources in namespaces
+        continue-on-error: true
+        run: |
+          echo "=== Deleting remaining resources ==="
+
+          for namespace in ftc-app-${{ github.event.inputs.environment }}; do
+            # Delete all deployments, services, ingresses, jobs, etc.
+            kubectl delete all --all -n "$namespace" --timeout=120s 2>/dev/null || true
+            kubectl delete ingress --all -n "$namespace" --timeout=60s 2>/dev/null || true
+            kubectl delete configmap --all -n "$namespace" --timeout=30s 2>/dev/null || true
+            kubectl delete secret --all -n "$namespace" --timeout=30s 2>/dev/null || true
+          done
+
+          echo "Remaining resources deleted"
+
+      - name: Delete application namespaces
+        continue-on-error: true
+        run: |
+          echo "=== Deleting application namespaces ==="
+
+          for namespace in ftc-app-${{ github.event.inputs.environment }} signoz; do
+            kubectl delete namespace "$namespace" \
+              --ignore-not-found=true \
+              --timeout=120s 2>/dev/null || true
+          done
+
+          echo "Namespaces deleted"
+
+      - name: Wait for finalizers
+        continue-on-error: true
+        run: |
+          echo "Waiting 30s for Kubernetes finalizers to complete..."
+          sleep 30
 
   # ---------------------------------------------------------------------------
   # Step 4b: Destroy EKS Cluster (Phase 1)
@@ -284,7 +498,7 @@ jobs:
   destroy-eks-cluster:
     name: "4b. Destroy EKS Cluster (Phase 1)"
     runs-on: ubuntu-latest
-    needs: [validate, destroy-database, destroy-eks-addons]
+    needs: [validate, destroy-database, destroy-eks-addons, clean-k8s-resources]
     if: always() && needs.validate.result == 'success'
     continue-on-error: true
     steps:
@@ -293,16 +507,20 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PAT }}
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: 'kubernetes-core-infra',
-              workflow_id: 'terraform.yml',
-              ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
-              inputs: {
-                environment: '${{ github.event.inputs.environment }}',
-                action: 'destroy'
-              }
-            });
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: 'kubernetes-core-infra',
+                workflow_id: 'terraform.yml',
+                ref: '${{ github.event.inputs.environment == 'production' && 'main' || 'develop' }}',
+                inputs: {
+                  environment: '${{ github.event.inputs.environment }}',
+                  action: 'destroy'
+                }
+              });
+            } catch (error) {
+              console.log('Could not trigger kubernetes-core-infra destroy:', error.message);
+            }
 
       - name: Wait for EKS cluster destruction
         continue-on-error: true
@@ -311,28 +529,114 @@ jobs:
           github-token: ${{ secrets.GH_PAT }}
           script: |
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const dispatchTime = new Date().toISOString();
             let attempts = 0;
+            await delay(15000);
             while (attempts < 60) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: 'kubernetes-core-infra',
                 workflow_id: 'terraform.yml',
-                per_page: 1
+                created: `>=${dispatchTime.split('T')[0]}`,
+                per_page: 5
               });
-              const latestRun = runs.data.workflow_runs[0];
-              if (latestRun?.status === 'completed') {
-                if (latestRun.conclusion === 'success') {
-                  console.log('✓ EKS cluster destruction completed successfully');
-                  return;
-                } else {
-                  console.log(`⚠ EKS cluster destruction failed: ${latestRun.conclusion}`);
-                  return; // Don't throw, just log and continue
-                }
+              const latestRun = runs.data.workflow_runs.find(r => r.created_at >= dispatchTime);
+              if (!latestRun) { attempts++; await delay(15000); continue; }
+              if (latestRun.status === 'completed') {
+                console.log(latestRun.conclusion === 'success'
+                  ? 'EKS cluster destruction completed successfully'
+                  : `EKS cluster destruction failed: ${latestRun.conclusion}`);
+                return;
               }
               attempts++;
               await delay(30000);
             }
-            console.log('⚠ EKS cluster destruction timed out');
+            console.log('EKS cluster destruction timed out');
+
+  # ---------------------------------------------------------------------------
+  # Force Cleanup - Aggressive orphan resource cleanup
+  # ---------------------------------------------------------------------------
+  force-cleanup:
+    name: Force Cleanup Orphaned Resources
+    runs-on: ubuntu-latest
+    needs: [destroy-microservices, destroy-lambda, destroy-messaging, destroy-database, destroy-eks-addons, clean-k8s-resources, destroy-eks-cluster]
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y jq > /dev/null 2>&1
+
+      - name: Run aggressive cleanup script
+        continue-on-error: true
+        run: |
+          chmod +x scripts/cleanup-aws-resources.sh
+          echo "DELETE" | ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }} || true
+
+      - name: Force delete orphaned IAM policies
+        continue-on-error: true
+        run: |
+          echo "=== Force deleting orphaned IAM policies ==="
+
+          # List all custom policies with project name
+          policies=$(aws iam list-policies --scope Local \
+            --query "Policies[?contains(PolicyName, 'fiap-tech-challenge')].Arn" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$policies" ]; then
+            for policy_arn in $policies; do
+              policy_name=$(echo "$policy_arn" | awk -F'/' '{print $NF}')
+              echo "Processing policy: $policy_name"
+
+              # Detach from all roles
+              attached_roles=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" \
+                --entity-filter Role --query 'PolicyRoles[*].RoleName' --output text 2>/dev/null || echo "")
+              for role in $attached_roles; do
+                echo "  Detaching from role: $role"
+                aws iam detach-role-policy --role-name "$role" --policy-arn "$policy_arn" 2>/dev/null || true
+              done
+
+              # Detach from all users
+              attached_users=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" \
+                --entity-filter User --query 'PolicyUsers[*].UserName' --output text 2>/dev/null || echo "")
+              for user in $attached_users; do
+                echo "  Detaching from user: $user"
+                aws iam detach-user-policy --user-name "$user" --policy-arn "$policy_arn" 2>/dev/null || true
+              done
+
+              # Detach from all groups
+              attached_groups=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" \
+                --entity-filter Group --query 'PolicyGroups[*].GroupName' --output text 2>/dev/null || echo "")
+              for group in $attached_groups; do
+                echo "  Detaching from group: $group"
+                aws iam detach-group-policy --group-name "$group" --policy-arn "$policy_arn" 2>/dev/null || true
+              done
+
+              # Delete all non-default versions
+              versions=$(aws iam list-policy-versions --policy-arn "$policy_arn" \
+                --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null || echo "")
+              for version in $versions; do
+                aws iam delete-policy-version --policy-arn "$policy_arn" --version-id "$version" 2>/dev/null || true
+              done
+
+              # Delete the policy
+              echo "  Deleting policy: $policy_name"
+              aws iam delete-policy --policy-arn "$policy_arn" 2>/dev/null || true
+            done
+            echo "✓ IAM policies cleaned"
+          else
+            echo "No orphaned policies found"
+          fi
 
   # ---------------------------------------------------------------------------
   # Validate Resources Deleted
@@ -340,8 +644,9 @@ jobs:
   validate-cleanup:
     name: Validate Resources Deleted
     runs-on: ubuntu-latest
-    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, destroy-eks-cluster]
+    needs: [force-cleanup]
     if: always()
+    continue-on-error: true
     steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -351,53 +656,87 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Check for orphaned resources
+      - name: Install jq
         run: |
-          echo "Checking for orphaned AWS resources..."
+          sudo apt-get update -qq && sudo apt-get install -y jq > /dev/null 2>&1
 
-          ORPHANED_RESOURCES=0
+      - name: Final validation
+        run: |
+          echo "=== Final Validation ==="
+          echo ""
 
-          # Check EKS cluster
-          if aws eks describe-cluster --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }} --region us-east-1 &>/dev/null; then
-            echo "::warning::EKS cluster still exists!"
-            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+          ORPHANED=0
+          WARNINGS=""
+
+          # Check ECR
+          echo "Checking ECR repositories..."
+          if ecr_repos=$(aws ecr describe-repositories --region us-east-1 2>/dev/null | jq -r '.repositories[].repositoryName' | grep "fiap-tech-challenge" 2>/dev/null); then
+            echo "::warning::ECR repositories still exist: $ecr_repos"
+            WARNINGS="${WARNINGS}\n- ECR repositories: $ecr_repos"
+            ORPHANED=$((ORPHANED + 1))
           else
-            echo "✓ EKS cluster deleted"
+            echo "✓ ECR clean"
+          fi
+
+          # Check EKS
+          echo "Checking EKS cluster..."
+          if aws eks describe-cluster --name fiap-tech-challenge-eks-${{ github.event.inputs.environment }} --region us-east-1 &>/dev/null; then
+            echo "::warning::EKS cluster still exists: fiap-tech-challenge-eks-${{ github.event.inputs.environment }}"
+            WARNINGS="${WARNINGS}\n- EKS cluster: fiap-tech-challenge-eks-${{ github.event.inputs.environment }}"
+            ORPHANED=$((ORPHANED + 1))
+          else
+            echo "✓ EKS clean"
           fi
 
           # Check RDS
+          echo "Checking RDS instances..."
           if aws rds describe-db-instances --db-instance-identifier fiap-tech-challenge-db-${{ github.event.inputs.environment }} --region us-east-1 &>/dev/null; then
-            echo "::warning::RDS instance still exists!"
-            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+            echo "::warning::RDS still exists: fiap-tech-challenge-db-${{ github.event.inputs.environment }}"
+            WARNINGS="${WARNINGS}\n- RDS: fiap-tech-challenge-db-${{ github.event.inputs.environment }}"
+            ORPHANED=$((ORPHANED + 1))
           else
-            echo "✓ RDS instance deleted"
+            echo "✓ RDS clean"
+          fi
+
+          # Check IAM Roles
+          echo "Checking IAM roles..."
+          if iam_roles=$(aws iam list-roles 2>/dev/null | jq -r '.Roles[].RoleName' | grep "fiap-tech-challenge" 2>/dev/null); then
+            echo "::warning::IAM roles still exist"
+            WARNINGS="${WARNINGS}\n- IAM roles: $(echo $iam_roles | head -n 3)"
+            ORPHANED=$((ORPHANED + 1))
+          else
+            echo "✓ IAM clean"
           fi
 
           # Check VPC
+          echo "Checking VPCs..."
           vpc_id=$(aws ec2 describe-vpcs \
-            --filters "Name=tag:Project,Values=fiap-tech-challenge" "Name=tag:Environment,Values=${{ github.event.inputs.environment }}" \
+            --filters "Name=tag:Project,Values=fiap-tech-challenge" \
             --region us-east-1 \
             --query 'Vpcs[0].VpcId' \
             --output text 2>/dev/null || echo "None")
 
           if [ "$vpc_id" != "None" ] && [ -n "$vpc_id" ]; then
             echo "::warning::VPC still exists: $vpc_id"
-            echo "::warning::Run cleanup script: ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}"
-            ORPHANED_RESOURCES=$((ORPHANED_RESOURCES + 1))
+            WARNINGS="${WARNINGS}\n- VPC: $vpc_id"
+            ORPHANED=$((ORPHANED + 1))
           else
-            echo "✓ VPC deleted"
+            echo "✓ VPC clean"
           fi
 
-          # Report summary
-          if [ $ORPHANED_RESOURCES -gt 0 ]; then
+          echo ""
+          echo "================================"
+          if [ $ORPHANED -gt 0 ]; then
+            echo "::warning::Found $ORPHANED orphaned resource(s) after cleanup"
+            echo -e "Resources still present:$WARNINGS"
             echo ""
-            echo "::error::Found $ORPHANED_RESOURCES orphaned resource(s)"
-            echo "::error::Manual cleanup required. Run: ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}"
-            exit 1
+            echo "These resources may require manual cleanup or take time to fully delete."
+            echo "Re-run destroy-all or run cleanup script manually if needed:"
+            echo "  ./scripts/cleanup-aws-resources.sh ${{ github.event.inputs.environment }}"
           else
-            echo ""
-            echo "✓ All resources successfully deleted"
+            echo "✅ All resources successfully deleted!"
           fi
+          echo "================================"
 
   # ---------------------------------------------------------------------------
   # Summary
@@ -405,7 +744,7 @@ jobs:
   summary:
     name: Destruction Summary
     runs-on: ubuntu-latest
-    needs: [destroy-app, destroy-lambda, destroy-database, destroy-eks-addons, destroy-eks-cluster, validate-cleanup]
+    needs: [destroy-microservices, destroy-lambda, destroy-messaging, destroy-database, destroy-eks-addons, clean-k8s-resources, destroy-eks-cluster, force-cleanup, validate-cleanup]
     if: always()
     steps:
       - name: Generate Summary
@@ -416,8 +755,17 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| K8s Application | ${{ needs.destroy-app.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Microservices (OS, Billing, Execution) | ${{ needs.destroy-microservices.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Lambda Functions | ${{ needs.destroy-lambda.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Messaging (SQS/EventBridge) | ${{ needs.destroy-messaging.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Database (RDS) | ${{ needs.destroy-database.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| K8s Addons (Phase 2) | ${{ needs.destroy-eks-addons.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **K8s Resources Cleanup** | ${{ needs.clean-k8s-resources.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| EKS Cluster (Phase 1) | ${{ needs.destroy-eks-cluster.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Force Cleanup** | ${{ needs.force-cleanup.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Final Validation** | ${{ needs.validate-cleanup.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Notes" >> $GITHUB_STEP_SUMMARY
+          echo "- Force cleanup removes orphaned resources (ECR, IAM roles, etc.)" >> $GITHUB_STEP_SUMMARY
+          echo "- Some resources may take time to fully delete (EKS, VPC)" >> $GITHUB_STEP_SUMMARY
+          echo "- Re-run destroy-all if validation shows orphaned resources" >> $GITHUB_STEP_SUMMARY
